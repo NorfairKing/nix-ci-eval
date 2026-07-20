@@ -1,0 +1,9 @@
+# Meson build directory
+/builddir/
+
+# nix build result symlinks
+/result
+/result-*
+
+# direnv cache, created by the committed .envrc
+/.direnv/

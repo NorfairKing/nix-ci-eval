@@ -115,6 +115,119 @@ std::vector<AttrPath> outputDependenciesFor(
     return std::vector<AttrPath>(depAttrs.begin(), depAttrs.end());
 }
 
+std::size_t EdgeDiscovery::intern(const std::string & path) {
+    auto found = idByPath_.find(path);
+    if (found != idByPath_.end()) {
+        return found->second;
+    }
+    std::size_t id = pathById_.size();
+    pathById_.push_back(path);
+    idByPath_.emplace(path, id);
+    return id;
+}
+
+std::vector<OutputEdge> EdgeDiscovery::addOutput(const AttrPath & attr,
+                                                 const std::string & drvPath) {
+    std::size_t pathId = intern(drvPath);
+    std::vector<OutputEdge> edges;
+
+    // Two outputs can be the same derivation, in which case the first to be
+    // registered names it. A second name for one derivation would otherwise
+    // stand in its own closure and depend on itself.
+    if (outputByPathId_.emplace(pathId, outputs_.size()).second) {
+        outputs_.push_back(attr);
+        std::size_t output = outputs_.size() - 1;
+
+        // Walks that already passed through this derivation were waiting to
+        // learn it was an output; they know their edge to it now.
+        auto reached = reachedBy_.find(pathId);
+        if (reached != reachedBy_.end()) {
+            for (std::size_t other : reached->second) {
+                if (other != output) {
+                    edges.push_back({outputs_[other], attr});
+                }
+            }
+        }
+
+        Walk walk;
+        walk.output = output;
+        walk.stack.push_back(pathId);
+        walk.visited.insert(pathId);
+        walks_.push_back(std::move(walk));
+        reachedBy_[pathId].push_back(output);
+    }
+    return edges;
+}
+
+// Move one walk as far as it can go, which is until it needs the references of
+// a path nobody has answered yet. Leaving that path on top of the stack is what
+// nextQuery reads, so a walk is never asked about twice and a shared subgraph
+// is queried once rather than once per output that contains it.
+void EdgeDiscovery::drain(Walk & walk, std::vector<OutputEdge> & edges) {
+    while (!walk.stack.empty()) {
+        std::size_t node = walk.stack.back();
+        auto known = references_.find(node);
+        if (known == references_.end()) {
+            return; // blocked until this path is answered
+        }
+        walk.stack.pop_back();
+        for (std::size_t reference : known->second) {
+            if (!walk.visited.insert(reference).second) {
+                continue;
+            }
+            reachedBy_[reference].push_back(walk.output);
+            auto isOutput = outputByPathId_.find(reference);
+            if (isOutput != outputByPathId_.end() &&
+                isOutput->second != walk.output) {
+                edges.push_back(
+                    {outputs_[walk.output], outputs_[isOutput->second]});
+            }
+            walk.stack.push_back(reference);
+        }
+    }
+}
+
+std::optional<std::string> EdgeDiscovery::nextQuery() {
+    for (const auto & walk : walks_) {
+        if (walk.stack.empty()) {
+            continue;
+        }
+        std::size_t node = walk.stack.back();
+        if (references_.count(node) == 0 && outstanding_.insert(node).second) {
+            return pathById_[node];
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<OutputEdge>
+EdgeDiscovery::provideReferences(const std::string & path,
+                                 const std::vector<std::string> & references) {
+    std::size_t pathId = intern(path);
+    outstanding_.erase(pathId);
+    std::vector<std::size_t> referenceIds;
+    referenceIds.reserve(references.size());
+    for (const auto & reference : references) {
+        referenceIds.push_back(intern(reference));
+    }
+    references_.emplace(pathId, referenceIds);
+
+    std::vector<OutputEdge> edges;
+    for (auto & walk : walks_) {
+        drain(walk, edges);
+    }
+    return edges;
+}
+
+bool EdgeDiscovery::done() const {
+    for (const auto & walk : walks_) {
+        if (!walk.stack.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::size_t residentMiBFromStatm(const std::string & statm,
                                  std::size_t pageSizeBytes) {
     // "size resident shared text lib data dt", in pages. The second field is

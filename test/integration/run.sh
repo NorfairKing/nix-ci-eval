@@ -63,6 +63,17 @@ if ! diff -u "$golden" <(printf '%s\n' "$actual"); then
   exit 1
 fi
 
+# An edge is reported as soon as both of its ends are known, so at least one
+# arrives before the last job does. Batching them until every job was in would
+# still pass the golden, which is sorted, so this is what holds the difference.
+last_job="$(jq -r '.type' < "$raw" | grep -n '^job$' | tail -1 | cut -d: -f1)"
+first_edge="$(jq -r '.type' < "$raw" | grep -n '^dependency$' | head -1 | cut -d: -f1)"
+if [ -z "$first_edge" ] || [ "$first_edge" -ge "$last_job" ]; then
+  echo "expected an edge before the last job, so edges are not batched to the end" >&2
+  jq -r '.type' < "$raw" | cat -n >&2
+  exit 1
+fi
+
 # The golden is sorted, so it cannot see ordering. The completion sentinel is
 # only worth anything if it is genuinely the last thing written: a consumer
 # that has seen it must be able to conclude it has seen everything.

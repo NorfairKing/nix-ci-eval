@@ -115,6 +115,119 @@ int main() {
     using namespace nixcieval;
 
     {
+        // Drive an EdgeDiscovery to exhaustion against a fixed graph, adding
+        // the outputs in the given order, and render the edges in the order
+        // they were reported as "from->to,from->to".
+        auto runDiscovery =
+            [](const std::vector<std::pair<AttrPath, std::string>> & outputs,
+               const std::map<std::string, std::vector<std::string>> & graph) {
+                EdgeDiscovery discovery;
+                std::string out;
+                auto record = [&](const std::vector<OutputEdge> & edges) {
+                    for (const auto & edge : edges) {
+                        if (!out.empty()) {
+                            out += ",";
+                        }
+                        out +=
+                            renderPath(edge.from) + "->" + renderPath(edge.to);
+                    }
+                };
+                for (const auto & [attr, drvPath] : outputs) {
+                    record(discovery.addOutput(attr, drvPath));
+                }
+                while (auto query = discovery.nextQuery()) {
+                    auto found = graph.find(*query);
+                    record(discovery.provideReferences(
+                        *query, found == graph.end()
+                                    ? std::vector<std::string>{}
+                                    : found->second));
+                }
+                return out;
+            };
+
+        std::map<std::string, std::vector<std::string>> graph = {
+            {"/a.drv", {"/b.drv", "/lib.drv"}},
+            {"/b.drv", {"/c.drv"}},
+            {"/c.drv", {}},
+            {"/lib.drv", {}},
+        };
+
+        // a depends on b directly and c through it; b depends on c. The edges
+        // are the same however the outputs happen to be discovered, which is
+        // what lets each one be reported the moment it is known.
+        expectEq("edges found walking forwards",
+                 runDiscovery({{AttrPath{"a"}, "/a.drv"},
+                               {AttrPath{"b"}, "/b.drv"},
+                               {AttrPath{"c"}, "/c.drv"}},
+                              graph),
+                 "a->b,a->c,b->c");
+        expectEq("the same edges when the outputs arrive in reverse",
+                 runDiscovery({{AttrPath{"c"}, "/c.drv"},
+                               {AttrPath{"b"}, "/b.drv"},
+                               {AttrPath{"a"}, "/a.drv"}},
+                              graph),
+                 "b->c,a->b,a->c");
+
+        // An output discovered after the walks have already passed through its
+        // derivation still gets its edges: that is the case that would be lost
+        // by only looking forwards.
+        expectEq("an output discovered late is still joined up",
+                 runDiscovery(
+                     {{AttrPath{"a"}, "/a.drv"}, {AttrPath{"lib"}, "/lib.drv"}},
+                     graph),
+                 "a->lib");
+
+        // A cycle must not loop forever, and neither end depends on itself.
+        std::map<std::string, std::vector<std::string>> cyclic = {
+            {"/x.drv", {"/y.drv"}},
+            {"/y.drv", {"/x.drv"}},
+        };
+        expectEq(
+            "a cycle terminates",
+            runDiscovery({{AttrPath{"x"}, "/x.drv"}, {AttrPath{"y"}, "/y.drv"}},
+                         cyclic),
+            "x->y,y->x");
+
+        // Two attributes that are the same derivation: the second is not a
+        // separate node, so neither stands in its own closure.
+        expectEq("an aliased derivation reports no edge",
+                 runDiscovery(
+                     {{AttrPath{"one"}, "/c.drv"}, {AttrPath{"two"}, "/c.drv"}},
+                     graph),
+                 "");
+
+        // Nothing to depend on at all.
+        expectEq("an output with no discovered dependencies reports none",
+                 runDiscovery({{AttrPath{"solo"}, "/lib.drv"}}, graph), "");
+    }
+
+    {
+        // The point of the whole exercise: an edge is reported before the
+        // walk that found it has finished, so a consumer hears about it as
+        // soon as it is true rather than once everything is known.
+        EdgeDiscovery discovery;
+        std::map<std::string, std::vector<std::string>> deep = {
+            {"/top.drv", {"/dep.drv"}},
+            {"/dep.drv", {"/n1.drv"}},
+            {"/n1.drv", {"/n2.drv"}},
+            {"/n2.drv", {"/n3.drv"}},
+            {"/n3.drv", {}},
+        };
+        discovery.addOutput(AttrPath{"top"}, "/top.drv");
+        discovery.addOutput(AttrPath{"dep"}, "/dep.drv");
+
+        // Answer only the first path. That is enough to know top->dep, while
+        // most of top's closure is still unwalked.
+        auto query = discovery.nextQuery();
+        expectBool("the first query is asked", query.has_value(), true);
+        auto edges = discovery.provideReferences(*query, deep.at(*query));
+        expectBool("the edge is known before the walk finishes",
+                   edges.size() == 1, true);
+        expectBool("and the walk is indeed unfinished", discovery.done(),
+                   false);
+    }
+
+    {
         // /proc/self/statm is "size resident shared ..." in pages, and it is
         // the second field that says what is held right now.
         expectBool("resident pages are read from the second field",

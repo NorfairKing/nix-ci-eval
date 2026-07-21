@@ -50,6 +50,11 @@ constexpr int kMaxStartupFailures = 3;
 // while still bounding a set that contains itself.
 constexpr std::size_t kMaxAttrPathDepth = 12;
 
+// How many reference queries one pass of the loop answers. Small enough that
+// servicing a worker is never held up for long, large enough that the walk
+// keeps pace with discovery.
+constexpr int kEdgeQueriesPerPass = 64;
+
 // An attribute waiting to be evaluated, with how many workers have already
 // died holding it. Carrying the count with the work is what lets a retry be
 // distinguished from a first attempt after the worker that had it is gone.
@@ -228,137 +233,23 @@ std::size_t maxWorkerCount(const Args & args) {
     return hardware == 0 ? 1 : hardware;
 }
 
-// Build the derivation reference graph reachable from 'roots': each derivation
-// path mapped to its direct reference derivation paths. The store is queried in
-// parallel by 'threads' workers, each with its own connection, so every
-// reachable derivation is read exactly once regardless of how many outputs
-// share it (the outputs' closures overlap heavily, so this is where the win is
-// over walking each output's closure independently).
-std::map<std::string, std::vector<std::string>>
-buildReferenceGraph(const std::vector<std::string> & roots,
-                    std::size_t threads) {
-    std::map<std::string, std::vector<std::string>> graph;
-    std::set<std::string> seen; // enqueued or being processed
-    std::vector<std::string> queue;
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::size_t inFlight = 0;
-
-    for (const auto & root : roots) {
-        if (seen.insert(root).second) {
-            queue.push_back(root);
-        }
+// Report the edges an EdgeDiscovery has just worked out, one line per
+// depending attribute.
+//
+// An attribute can appear in several dependency lines over a run: an edge is
+// reported as soon as both of its ends are known, rather than held back until
+// everything that attribute depends on has been found. A consumer therefore
+// merges the lines for an attribute rather than taking the last one as its
+// answer.
+void emitEdges(const std::vector<OutputEdge> & edges) {
+    std::map<AttrPath, std::vector<AttrPath>> byFrom;
+    for (const auto & edge : edges) {
+        byFrom[edge.from].push_back(edge.to);
     }
-    if (queue.empty()) {
-        return graph;
-    }
-
-    auto worker = [&]() {
-        std::shared_ptr<nix::Store> store;
-        try {
-            store = nix::openStore();
-        } catch (const std::exception & e) {
-            // Without a store this thread contributes no edges; the others
-            // (or a degraded result) carry on rather than crashing the run.
-            fprintf(stderr,
-                    "nix-ci-eval: dependency worker could not open "
-                    "store: %s\n",
-                    e.what());
-            return;
-        }
-
-        std::unique_lock<std::mutex> lock(mutex);
-        while (true) {
-            cv.wait(lock, [&] { return !queue.empty() || inFlight == 0; });
-            if (queue.empty()) {
-                // No work left and nothing in flight can produce more. Wake the
-                // other threads so they can observe the same and finish.
-                cv.notify_all();
-                return;
-            }
-
-            std::string path = std::move(queue.back());
-            queue.pop_back();
-            inFlight++;
-            lock.unlock();
-
-            std::vector<std::string> references;
-            try {
-                auto info = store->queryPathInfo(store->parseStorePath(path));
-                references.reserve(info->references.size());
-                for (const auto & reference : info->references) {
-                    references.push_back(store->printStorePath(reference));
-                }
-            } catch (const std::exception &) {
-                // A path we cannot query (e.g. not in the store) is a leaf.
-            }
-
-            lock.lock();
-            std::size_t added = 0;
-            for (const auto & reference : references) {
-                if (seen.insert(reference).second) {
-                    queue.push_back(reference);
-                    added++;
-                }
-            }
-            graph.emplace(std::move(path), std::move(references));
-            inFlight--;
-            // Only wake others when there is new work to claim or the traversal
-            // has finished; otherwise there is nothing for a waiter to do.
-            if (added > 0 || inFlight == 0) {
-                cv.notify_all();
-            }
-        }
-    };
-
-    // No point in more threads (or store connections) than there are roots to
-    // start from.
-    std::size_t poolSize = std::min(threads, roots.size());
-    std::vector<std::thread> pool;
-    pool.reserve(poolSize);
-    for (std::size_t i = 0; i < poolSize; i++) {
-        pool.emplace_back(worker);
-    }
-    for (auto & thread : pool) {
-        thread.join();
-    }
-    return graph;
-}
-
-// Compute the dependency edges between discovered outputs and emit them.
-void emitDependencies(
-    const std::vector<std::pair<AttrPath, std::string>> & discovered,
-    std::size_t threads) {
-    // Map each derivation path to its attribute (first wins, so two outputs
-    // that are the same derivation collapse to one name), and collect the
-    // graph roots.
-    std::map<std::string, AttrPath> drvPathToAttr;
-    std::vector<std::string> roots;
-    for (const auto & [attr, drvPath] : discovered) {
-        if (drvPathToAttr.emplace(drvPath, attr).second) {
-            roots.push_back(drvPath);
-        }
-    }
-
-    // The graph is built in one shared traversal because the outputs' closures
-    // overlap heavily. Only the edges are then computed one output at a time,
-    // and emitted as they are, so a consumer reads them as a stream rather
-    // than waiting for the last output to be walked.
-    auto references = buildReferenceGraph(roots, threads);
-
-    // Emit in discovery order for stable, predictable output.
-    for (const auto & [attr, drvPath] : discovered) {
-        auto dependencies =
-            outputDependenciesFor(attr, drvPath, references, drvPathToAttr);
-        if (dependencies.empty()) {
-            continue;
-        }
-        // Keyed by attrPath, the same shape a job line uses, so a consumer
-        // matches edges to jobs without parsing a rendered attribute back
-        // apart.
+    for (auto & [from, to] : byFrom) {
         json line;
-        line["attrPath"] = attr;
-        line["dependencies"] = std::move(dependencies);
+        line["attrPath"] = from;
+        line["dependencies"] = std::move(to);
         emit("dependency", std::move(line));
     }
 }
@@ -423,7 +314,16 @@ int runCoordinator(const Args & args) {
     };
 
     // (attr, drvPath) of every kept output, for optional dependency discovery.
-    std::vector<std::pair<AttrPath, std::string>> discovered;
+    // Edges are worked out as the run goes, in the coordinator time that is
+    // otherwise spent waiting on workers, so each one is reported as soon as
+    // both of its ends are known.
+    EdgeDiscovery edgeDiscovery;
+    // Cleared if the store turns out to be unreadable, so the run reports what
+    // it can rather than stopping.
+    bool wantEdges = args.dependencies;
+    // Opened on first use and only when edges are wanted, so a run that does
+    // not ask for them never opens a store at all.
+    std::shared_ptr<nix::Store> edgeStore;
     bool fatal = false;
     std::string fatalMessage;
 
@@ -530,9 +430,9 @@ int runCoordinator(const Args & args) {
         if (kind == "job") {
             auto attrPath =
                 message.at("attrPath").get<std::vector<std::string>>();
-            if (args.dependencies) {
-                discovered.emplace_back(
-                    attrPath, message.at("drvPath").get<std::string>());
+            if (wantEdges) {
+                emitEdges(edgeDiscovery.addOutput(
+                    attrPath, message.at("drvPath").get<std::string>()));
             }
             emit("job", std::move(message));
             return;
@@ -611,8 +511,50 @@ int runCoordinator(const Args & args) {
         return static_cast<int>(millis.count());
     };
 
+    // Answer a bounded number of reference queries, so the loop keeps
+    // servicing workers rather than disappearing into a closure walk. The
+    // coordinator is idle most of a run, waiting on evaluation, which is the
+    // time this uses.
+    auto stepEdges = [&](int budget) {
+        if (!wantEdges) {
+            return;
+        }
+        for (int i = 0; i < budget; i++) {
+            auto query = edgeDiscovery.nextQuery();
+            if (!query) {
+                return;
+            }
+            if (!edgeStore) {
+                try {
+                    edgeStore = nix::openStore();
+                } catch (const std::exception & e) {
+                    // Without a store there are no edges to report. Say so
+                    // once, rather than leaving a consumer to read their
+                    // absence as "this flake has none".
+                    fprintf(stderr,
+                            "nix-ci-eval: cannot read dependencies: %s\n",
+                            e.what());
+                    wantEdges = false;
+                    return;
+                }
+            }
+            std::vector<std::string> references;
+            try {
+                auto info =
+                    edgeStore->queryPathInfo(edgeStore->parseStorePath(*query));
+                references.reserve(info->references.size());
+                for (const auto & reference : info->references) {
+                    references.push_back(edgeStore->printStorePath(reference));
+                }
+            } catch (const std::exception &) {
+                // A path that cannot be queried is a leaf.
+            }
+            emitEdges(edgeDiscovery.provideReferences(*query, references));
+        }
+    };
+
     while (true) {
-        // Nix's signal-handler thread turns SIGINT and SIGTERM into this flag
+        // Nix.s signal-handler thread turns SIGINT and SIGTERM into this flag
         // rather than letting them reach us directly, so asking is the only
         // way to find out. Without it the tool runs to completion no matter
         // what its caller sends, which for anything running under a timeout
@@ -624,6 +566,7 @@ int runCoordinator(const Args & args) {
         }
         growPool();
         dispatch();
+        stepEdges(kEdgeQueriesPerPass);
         if (todo.empty() && active == 0) {
             break;
         }
@@ -712,8 +655,11 @@ int runCoordinator(const Args & args) {
         return 1;
     }
 
-    if (args.dependencies) {
-        emitDependencies(discovered, maxWorkers);
+    // Whatever the interleaved passes did not get to. Most of the walk is
+    // usually already done by here, since it ran in the time the coordinator
+    // spent waiting on workers.
+    while (wantEdges && !edgeDiscovery.done()) {
+        stepEdges(1024);
     }
 
     // Say that the stream is complete, as its last act.

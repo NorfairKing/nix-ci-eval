@@ -40,7 +40,8 @@ aborting the run:
 }
 ```
 
-Then, after all the jobs, a `dependency` edge to another discovered output:
+A `dependency` edge to another discovered output, reported as soon as both of
+its ends are known, so these arrive mixed in with the jobs:
 
 ```json
 {
@@ -49,6 +50,11 @@ Then, after all the jobs, a `dependency` edge to another discovered output:
   "dependencies": [["packages", "x86_64-linux", "autodocodec"]]
 }
 ```
+
+One attribute can appear in several of these, each naming a few of the things
+it depends on, so take their union rather than the last one you saw.
+Dependencies are transitive: if `a` depends on `b` and `b` on `c`, then `a`
+depends on `c` too and that edge is reported.
 
 The last line is always this, and only ever appears once:
 

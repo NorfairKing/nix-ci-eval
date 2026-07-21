@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstddef>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -135,6 +137,79 @@ std::vector<AttrPath> outputDependenciesFor(
     const AttrPath & attr, const std::string & drvPath,
     const std::map<std::string, std::vector<std::string>> & references,
     const std::map<std::string, AttrPath> & drvPathToAttr);
+
+// One dependency edge: the output that depends, and the one it depends on.
+struct OutputEdge {
+    AttrPath from;
+    AttrPath to;
+};
+
+// Works out which discovered outputs lie in which others' closures, reporting
+// each edge as soon as both of its ends are known rather than once an output
+// has been walked in full.
+//
+// An edge is final the moment both of its ends are known, so waiting for the
+// rest of an output's closure only delays telling someone a thing that cannot
+// change. The two ends can be learned in either order, and both are handled:
+// walking A may reach B's derivation before B has been discovered, or B may be
+// discovered after several walks have already passed through it.
+//
+// Knows nothing about a store. It names the path whose references it needs and
+// is told the answer, so the traversal can be driven from the coordinator's
+// idle time and tested without a store at all.
+class EdgeDiscovery {
+  public:
+    // Register a discovered output. Returns the edges that this makes known,
+    // which are those from outputs whose walks already passed through this
+    // output's derivation.
+    std::vector<OutputEdge> addOutput(const AttrPath & attr,
+                                      const std::string & drvPath);
+
+    // The next path whose references are needed, or nothing when every walk is
+    // waiting on nothing.
+    std::optional<std::string> nextQuery();
+
+    // Answer the path nextQuery named. Returns the edges this answer makes
+    // known.
+    std::vector<OutputEdge>
+    provideReferences(const std::string & path,
+                      const std::vector<std::string> & references);
+
+    // Whether every registered output has been walked to exhaustion.
+    bool done() const;
+
+  private:
+    // One walk per output: what it still has to expand, and what it has seen.
+    struct Walk {
+        std::size_t output = 0;
+        std::vector<std::size_t> stack;
+        std::set<std::size_t> visited;
+    };
+
+    void drain(Walk & walk, std::vector<OutputEdge> & edges);
+
+    // Paths are interned so that the per-output visited sets, which together
+    // hold one entry per output per node of its closure, cost an integer each
+    // rather than a string each.
+    std::size_t intern(const std::string & path);
+
+    std::vector<std::string> pathById_;
+    std::map<std::string, std::size_t> idByPath_;
+
+    std::vector<AttrPath> outputs_;
+    std::map<std::size_t, std::size_t> outputByPathId_;
+
+    // Which outputs' walks have reached a given path, so that an output
+    // discovered later can be joined up to the walks that already passed it.
+    std::map<std::size_t, std::vector<std::size_t>> reachedBy_;
+
+    std::vector<Walk> walks_;
+
+    // Paths handed out by nextQuery and not yet answered, so the same path is
+    // not queried once per walk that wants it.
+    std::set<std::size_t> outstanding_;
+    std::map<std::size_t, std::vector<std::size_t>> references_;
+};
 
 // The resident size in MiB reported by the contents of /proc/self/statm, whose
 // second field is the resident page count.

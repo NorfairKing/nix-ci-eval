@@ -430,11 +430,15 @@ int runCoordinator(const Args & args) {
         if (kind == "job") {
             auto attrPath =
                 message.at("attrPath").get<std::vector<std::string>>();
-            if (wantEdges) {
-                emitEdges(edgeDiscovery.addOutput(
-                    attrPath, message.at("drvPath").get<std::string>()));
-            }
+            auto drvPath = message.at("drvPath").get<std::string>();
+            // The job goes out before the edges its arrival makes known,
+            // because those edges name it: a consumer told to order a build
+            // against an attribute it has not been told about yet has nothing
+            // to attach the edge to, and drops it.
             emit("job", std::move(message));
+            if (wantEdges) {
+                emitEdges(edgeDiscovery.addOutput(attrPath, drvPath));
+            }
             return;
         }
     };

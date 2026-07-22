@@ -74,6 +74,29 @@ if [ -z "$first_edge" ] || [ "$first_edge" -ge "$last_job" ]; then
   exit 1
 fi
 
+# An edge names attributes that a consumer has to have been told about already,
+# because it cannot order a build it has never heard of. So every end of every
+# edge must have been announced as a job earlier in the stream.
+if ! jq -r '
+  if .type == "job" then
+    "job " + (.attrPath | join("."))
+  elif .type == "dependency" then
+    (["dep " + (.attrPath | join("."))]
+      + (.dependencies | map("dep " + join(".")))) | .[]
+  else
+    empty
+  end' < "$raw" |
+  awk '
+    $1 == "job" { seen[$2] = 1; next }
+    $1 == "dep" && !($2 in seen) {
+      print "  edge names " $2 " before its job line" > "/dev/stderr"
+      bad = 1
+    }
+    END { exit bad ? 1 : 0 }'; then
+  echo "every end of an edge must be announced as a job before the edge names it" >&2
+  exit 1
+fi
+
 # The golden is sorted, so it cannot see ordering. The completion sentinel is
 # only worth anything if it is genuinely the last thing written: a consumer
 # that has seen it must be able to conclude it has seen everything.

@@ -228,6 +228,35 @@ int main() {
     }
 
     {
+        // An output can be discovered after another output's walk has already
+        // passed through its derivation and run dry. The walk that starts for
+        // it then begins on a path whose references are already known, so no
+        // query can move it along, and only draining it on the spot finishes
+        // it. Leave it stuck and the caller is left with a discovery that is
+        // never done and never has anything to ask, which is a spin rather
+        // than a wait.
+        EdgeDiscovery discovery;
+        discovery.addOutput(AttrPath{"top"}, "/top.drv");
+        while (auto query = discovery.nextQuery()) {
+            discovery.provideReferences(
+                *query, *query == "/top.drv"
+                            ? std::vector<std::string>{"/dep.drv"}
+                            : std::vector<std::string>{});
+        }
+        expectBool("the first walk runs dry", discovery.done(), true);
+
+        auto edges = discovery.addOutput(AttrPath{"dep"}, "/dep.drv");
+        expectEq("the edge to the late output is reported",
+                 edges.size() == 1 ? renderPath(edges[0].from) + "->" +
+                                         renderPath(edges[0].to)
+                                   : "",
+                 "top->dep");
+        expectBool("and its own walk needs nothing to finish",
+                   discovery.nextQuery().has_value(), false);
+        expectBool("so the discovery is done", discovery.done(), true);
+    }
+
+    {
         // /proc/self/statm is "size resident shared ..." in pages, and it is
         // the second field that says what is held right now.
         expectBool("resident pages are read from the second field",

@@ -68,6 +68,17 @@ Read it as the only proof that you have the whole stream. Output that stops
 without it was cut short, which otherwise looks exactly like a flake with
 fewer outputs.
 
+## Fetching
+
+A `git+` flake reference to a remote repository is fetched shallow, so only the
+commit being evaluated comes over the network instead of everything it descends
+from. In exchange, Nix cannot count revisions it did not fetch, so `self.revCount`
+is missing and a flake that reads it fails to evaluate. Local repositories keep
+their `revCount`, since nothing they hand over crosses a network and there is
+little to win by cutting their history short. `github:` and `gitlab:` references
+are untouched too: they fetch a tarball of the one commit and never involved git
+to begin with.
+
 More invocations:
 
 ```console

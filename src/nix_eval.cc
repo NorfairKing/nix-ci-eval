@@ -10,7 +10,9 @@
 #include <nix/expr/eval.hh>
 #include <nix/expr/get-drvs.hh>
 #include <nix/expr/value.hh>
+#include <nix/fetchers/attrs.hh>
 #include <nix/fetchers/fetch-settings.hh>
+#include <nix/fetchers/fetchers.hh>
 #include <nix/flake/flake.hh>
 #include <nix/flake/flakeref.hh>
 #include <nix/flake/settings.hh>
@@ -80,6 +82,32 @@ std::string selectExpr(const std::string & system) {
            "}";
 }
 
+// Fetching a git flake ref pulls down every commit the requested one descends
+// from, which for a long-lived repository is orders of magnitude more than the
+// single tree this tool evaluates. Asking for a shallow fetch makes Nix pass
+// --depth 1, so only the commit under evaluation crosses the network.
+//
+// The cost is that Nix cannot count revisions without the history, so it leaves
+// out `revCount` and a flake reading self.revCount fails to evaluate.
+//
+// Local repositories are left alone, because nothing they hand over crosses a
+// network: shallowness would win them little and cost them revCount all the
+// same.
+nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef) {
+    if (flakeRef.input.getType() != "git") {
+        return flakeRef;
+    }
+    auto url = nix::fetchers::maybeGetStrAttr(flakeRef.input.attrs, "url");
+    if (!url || url->starts_with("file:")) {
+        return flakeRef;
+    }
+    auto attrs = flakeRef.input.attrs;
+    attrs.insert_or_assign("shallow", nix::Explicit<bool>{true});
+    return nix::FlakeRef(
+        nix::fetchers::Input::fromAttrs(nix::fetchSettings, std::move(attrs)),
+        flakeRef.subdir);
+}
+
 } // namespace
 
 struct Evaluator::Impl {
@@ -93,8 +121,8 @@ struct Evaluator::Impl {
           state(nix::make_ref<nix::EvalState>(
               nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings)),
           root(nullptr) {
-        auto flakeRef = nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
-                                           std::filesystem::current_path());
+        auto flakeRef = shallowIfRemoteGit(nix::parseFlakeRef(
+            nix::fetchSettings, args.flakeRef, std::filesystem::current_path()));
         // Read-only locking: never update, write, or fetch from registries,
         // and require the flake to be fully locked.
         nix::flake::LockFlags lockFlags;

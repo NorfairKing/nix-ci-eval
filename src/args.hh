@@ -36,6 +36,11 @@ struct Args {
     // Evaluate impurely (allows access to the ambient environment). Flakes are
     // evaluated purely by default.
     bool impure = false;
+    // Fetch only the commit being evaluated when the flake reference names a
+    // remote git repository, rather than everything it descends from. Turned
+    // off with --no-shallow for a flake that reads self.revCount, which Nix
+    // cannot supply without the history.
+    bool shallow = true;
 };
 
 // Parse argv into 'Args'. Throws std::runtime_error with a usage message on a

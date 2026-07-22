@@ -88,12 +88,16 @@ std::string selectExpr(const std::string & system) {
 // --depth 1, so only the commit under evaluation crosses the network.
 //
 // The cost is that Nix cannot count revisions without the history, so it leaves
-// out `revCount` and a flake reading self.revCount fails to evaluate.
+// out `revCount` and a flake reading self.revCount fails to evaluate. That is
+// what --no-shallow is for.
 //
 // Local repositories are left alone, because nothing they hand over crosses a
 // network: shallowness would win them little and cost them revCount all the
 // same.
-nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef) {
+nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow) {
+    if (!shallow) {
+        return flakeRef;
+    }
     if (flakeRef.input.getType() != "git") {
         return flakeRef;
     }
@@ -121,8 +125,10 @@ struct Evaluator::Impl {
           state(nix::make_ref<nix::EvalState>(
               nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings)),
           root(nullptr) {
-        auto flakeRef = shallowIfRemoteGit(nix::parseFlakeRef(
-            nix::fetchSettings, args.flakeRef, std::filesystem::current_path()));
+        auto flakeRef = shallowIfRemoteGit(
+            nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
+                               std::filesystem::current_path()),
+            args.shallow);
         // Read-only locking: never update, write, or fetch from registries,
         // and require the flake to be fully locked.
         nix::flake::LockFlags lockFlags;

@@ -1,6 +1,8 @@
+dep checks.x86_64-linux.delta -> packages.x86_64-linux.alpha
 dep packages.x86_64-linux.beta -> packages.x86_64-linux.alpha
 done
 error checks.x86_64-linux.broken
+job checks.x86_64-linux.delta delta cached=false
 job checks.x86_64-linux.gamma gamma cached=false
 job devShells.x86_64-linux.default devshell cached=false
 job formatter.x86_64-linux formatter cached=false

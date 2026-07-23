@@ -155,6 +155,12 @@ std::vector<OutputEdge> EdgeDiscovery::addOutput(const AttrPath & attr,
         walk.visited.insert(pathId);
         walks_.push_back(std::move(walk));
         reachedBy_[pathId].push_back(output);
+
+        // As far as what is already known allows. An earlier walk may have
+        // been through this derivation and learned its references, and nothing
+        // will be queried on this walk's behalf for what is already answered,
+        // so a walk left standing here would never move again.
+        drain(walks_.back(), edges);
     }
     return edges;
 }

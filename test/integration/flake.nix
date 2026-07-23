@@ -32,6 +32,10 @@
 
       checks.${system} = {
         gamma = drv "gamma" "echo gamma > $out";
+        # Depends on a package, and checks are discovered before packages, so
+        # this edge becomes known while the attribute it names has not been
+        # reported yet. That is the order a consumer has to survive.
+        delta = drv "delta" "echo ${alpha} > $out";
         # Fails to evaluate: nix-ci-eval isolates it as an error line and keeps
         # going rather than aborting the run.
         broken = throw "this attribute fails to evaluate";

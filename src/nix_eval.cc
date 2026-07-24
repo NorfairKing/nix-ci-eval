@@ -82,6 +82,8 @@ std::string selectExpr(const std::string & system) {
            "}";
 }
 
+} // namespace
+
 // Fetching a git flake ref pulls down every commit the requested one descends
 // from, which for a long-lived repository is orders of magnitude more than the
 // single tree this tool evaluates. Asking for a shallow fetch makes Nix pass
@@ -111,8 +113,6 @@ nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow) {
         nix::fetchers::Input::fromAttrs(nix::fetchSettings, std::move(attrs)),
         flakeRef.subdir);
 }
-
-} // namespace
 
 struct Evaluator::Impl {
     Args args;

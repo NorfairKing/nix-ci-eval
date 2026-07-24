@@ -61,3 +61,15 @@ pure_test = executable(
   include_directories : include_directories('src'),
 )
 test('pure', pure_test)
+
+# Links the Nix evaluator so it can parse real flake references and check which
+# ones shallowIfRemoteGit marks for a shallow fetch. It never fetches, so it
+# needs no network.
+shallow_test = executable(
+  'shallow-test',
+  'test/shallow_test.cc',
+  link_with : [core_lib, nix_lib],
+  dependencies : nix_deps,
+  include_directories : include_directories('src'),
+)
+test('shallow', shallow_test)

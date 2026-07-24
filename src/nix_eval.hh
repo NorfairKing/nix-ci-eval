@@ -9,10 +9,18 @@ namespace nix {
 class EvalState;
 struct Value;
 class Store;
+struct FlakeRef;
 template <typename T> class ref;
 } // namespace nix
 
 namespace nixcieval {
+
+// Return the flake reference to actually evaluate: when 'shallow' is set and
+// 'flakeRef' names a remote git repository, one whose fetch pulls only the
+// commit under evaluation (Nix's --depth 1) rather than its whole ancestry.
+// Local (file://), github: and gitlab: references, and anything but git, are
+// returned unchanged. See the definition for why.
+nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow);
 
 // What evaluating one attribute produced.
 enum class OutcomeKind {

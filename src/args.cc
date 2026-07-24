@@ -30,6 +30,9 @@ const char * const USAGE =
     "  --no-dependencies            Skip the dependency edges between outputs\n"
     "  --no-import-from-derivation  Disallow import-from-derivation\n"
     "  --impure                     Evaluate impurely (default: pure)\n"
+    "  --no-shallow                 Fetch a remote git flake's whole history, "
+    "which\n"
+    "                               a flake reading self.revCount needs\n"
     "  --help, -h                   Show this help\n";
 
 // Parse a count that must be at least one. Zero is rejected rather than given
@@ -98,6 +101,8 @@ Args parseArgs(int argc, char ** argv) {
             args.importFromDerivation = false;
         } else if (arg == "--impure") {
             args.impure = true;
+        } else if (arg == "--no-shallow") {
+            args.shallow = false;
         } else if (arg == "--help" || arg == "-h") {
             throw HelpRequested{USAGE};
         } else {

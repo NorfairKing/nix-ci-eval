@@ -50,6 +50,22 @@
                 bash ${./test/integration}/run.sh
                 touch $out
               '';
+
+          # Serves a two-commit repository over a loopback git daemon and
+          # asserts the default fetch pulls only the one commit while
+          # --no-shallow pulls both. The daemon is on 127.0.0.1, so this needs
+          # no network; git provides both the client and the daemon.
+          nix-ci-eval-shallow-fetch-test =
+            pkgs.runCommand "nix-ci-eval-shallow-fetch-test"
+              {
+                nativeBuildInputs = [ pkgs.git ];
+                NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+              }
+              ''
+                export HOME=$TMPDIR
+                bash ${./test/shallow}/run.sh
+                touch $out
+              '';
         });
 
       devShells.${devSystem}.default =

@@ -568,6 +568,10 @@ int main() {
                    parse(withFlags({"--no-import-from-derivation"}))
                        .importFromDerivation,
                    false);
+        expectBool("a remote git ref is fetched shallow unless declined",
+                   parse(required).shallow, true);
+        expectBool("--no-shallow asks for the whole history",
+                   parse(withFlags({"--no-shallow"})).shallow, false);
         expectBool("no --workers leaves the ceiling to the machine",
                    parse(required).workers.has_value(), false);
         expectBool("--workers sets the ceiling",

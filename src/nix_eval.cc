@@ -22,6 +22,7 @@
 #include <nix/store/store-api.hh>
 #include <nix/store/store-open.hh>
 #include <nix/util/configuration.hh>
+#include <nix/util/current-process.hh>
 #include <nix/util/terminal.hh>
 
 #include "pure.hh"
@@ -239,6 +240,19 @@ EvalOutcome Evaluator::evalAttr(const std::vector<std::string> & attrPath) {
 }
 
 void initNixRuntime(const Args & args) {
+    // Evaluate with the same stack the `nix` CLI gives itself. A worker
+    // inherits the default 8 MiB stack, but a deep-but-finite flake (nested
+    // attribute sets, a large data literal, a value materialised from an IFD)
+    // recurses far enough in the evaluator to overflow that, and Nix turns a
+    // stack overflow into an uncatchable SIGSEGV: the worker dies and its
+    // attribute is reported as a crashed worker rather than discovered. The
+    // `nix` CLI raises the stack to 64 MiB before evaluating for exactly this
+    // reason, so `nix flake show` handled such flakes; matching it keeps
+    // discovery from regressing against what a caller could evaluate by hand.
+    // Raised here in the coordinator, before any worker is forked, so every
+    // worker inherits the larger limit.
+    nix::setStackSize(64 * 1024 * 1024);
+
     nix::initNix();
     nix::initGC();
 

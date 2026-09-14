@@ -30,25 +30,45 @@ using nlohmann::json;
 // arbitrarily large one; the reason survives, the flood does not.
 constexpr std::size_t kMaxMessageBytes = 64 * 1024;
 
-// How much this worker is holding right now, in MiB.
+// The first bytes of a /proc file, or an empty string if it cannot be read.
+// These files are generated on read, so they have no size to stat and are read
+// into a fixed buffer.
+std::string readProcFile(const char * path) {
+    std::FILE * file = std::fopen(path, "r");
+    if (file == nullptr) {
+        return {};
+    }
+    char buffer[4096] = {};
+    std::size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, file);
+    std::fclose(file);
+    return std::string(buffer, read);
+}
+
+// How much this worker is holding right now that it does not share with the
+// process that forked it, in MiB.
 //
 // Read from /proc rather than getrusage, whose ru_maxrss is a lifetime peak
 // that never falls: with the peak, one expensive attribute would leave a
 // worker over the ceiling forever and force a restart after every subsequent
-// attribute, re-forcing the whole evaluation substrate each time.
-std::size_t currentResidentMiB() {
-    std::FILE * statm = std::fopen("/proc/self/statm", "r");
-    if (statm == nullptr) {
-        return 0;
+// attribute.
+//
+// Private rather than total, because a worker forked from the substrate host
+// shares that host's whole evaluator: counting the shared pages against every
+// worker holding them would put the pool over any ceiling the substrate itself
+// approaches, and restarting a worker would not win them back.
+std::size_t currentPrivateMiB() {
+    auto priv =
+        privateMiBFromSmapsRollup(readProcFile("/proc/self/smaps_rollup"));
+    if (priv) {
+        return *priv;
     }
-    char buffer[256] = {};
-    std::size_t read = std::fread(buffer, 1, sizeof(buffer) - 1, statm);
-    std::fclose(statm);
+    // Without smaps_rollup there is no split to make, and resident size is the
+    // honest answer for a worker that shares nothing.
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) {
         return 0;
     }
-    return residentMiBFromStatm(std::string(buffer, read),
+    return residentMiBFromStatm(readProcFile("/proc/self/statm"),
                                 static_cast<std::size_t>(pageSize));
 }
 
@@ -75,18 +95,33 @@ json jobToJson(const std::vector<std::string> & attrPath,
 // where it would run parent-only teardown (waitpid/close) on shared state.
 // Never returns (it only ever std::_Exit()s), which is what lets runWorker
 // stay [[noreturn]].
-[[noreturn]] void runWorkerLoop(const Args & args, int toParentFd,
-                                int fromParentFd) {
+[[noreturn]] void runWorkerLoop(const Args & args, Evaluator * inherited,
+                                int toParentFd, int fromParentFd) {
     LineReader fromParent(fromParentFd);
 
-    std::unique_ptr<Evaluator> evaluator;
-    try {
-        evaluator = std::make_unique<Evaluator>(args);
-    } catch (const std::exception & e) {
-        fatalToParent(
-            toParentFd,
-            "failed to evaluate flake: " +
-                truncateForLine(cleanErrorMessage(e.what()), kMaxMessageBytes));
+    std::unique_ptr<Evaluator> owned;
+    Evaluator * evaluator = inherited;
+    if (evaluator == nullptr) {
+        try {
+            owned = std::make_unique<Evaluator>(args);
+        } catch (const std::exception & e) {
+            fatalToParent(toParentFd,
+                          "failed to evaluate flake: " +
+                              truncateForLine(cleanErrorMessage(e.what()),
+                                              kMaxMessageBytes));
+        }
+        evaluator = owned.get();
+    } else {
+        // The evaluator came across a fork, so its heap is warm and its store
+        // handles belong to the process it was forked from.
+        try {
+            evaluator->reopenStoreAfterFork();
+        } catch (const std::exception & e) {
+            fatalToParent(toParentFd,
+                          "failed to open the store: " +
+                              truncateForLine(cleanErrorMessage(e.what()),
+                                              kMaxMessageBytes));
+        }
     }
 
     while (true) {
@@ -146,7 +181,7 @@ json jobToJson(const std::vector<std::string> & attrPath,
 
         // Recycle once this worker is over the ceiling, so a long-running
         // evaluator cannot grow without bound.
-        if (currentResidentMiB() > args.maxMemoryMiB) {
+        if (currentPrivateMiB() > args.maxMemoryMiB) {
             writeLine(toParentFd, R"({"t":"restart"})");
             std::_Exit(0);
         }
@@ -155,13 +190,16 @@ json jobToJson(const std::vector<std::string> & attrPath,
 
 } // namespace
 
-void runWorker(const Args & args, int toParentFd, int fromParentFd) {
-    // A forked child must never let an exception unwind into the parent's
-    // stack frames. Guard the whole loop so any escape (e.g. a malformed
-    // request, or bad_alloc) becomes a fatal message to the parent and a clean
-    // exit, rather than running parent teardown on shared state.
+namespace {
+
+// A forked child must never let an exception unwind into the frames of the
+// process it was forked from, where it would run that process's teardown on
+// shared state. Guard the whole loop so any escape (a malformed request, or
+// bad_alloc) becomes a fatal message to the parent and a clean exit.
+[[noreturn]] void runGuardedWorkerLoop(const Args & args, Evaluator * inherited,
+                                       int toParentFd, int fromParentFd) {
     try {
-        runWorkerLoop(args, toParentFd, fromParentFd);
+        runWorkerLoop(args, inherited, toParentFd, fromParentFd);
     } catch (const std::exception & e) {
         fatalToParent(
             toParentFd,
@@ -170,6 +208,17 @@ void runWorker(const Args & args, int toParentFd, int fromParentFd) {
     } catch (...) {
         fatalToParent(toParentFd, "worker error: unknown exception");
     }
+}
+
+} // namespace
+
+void runWorker(const Args & args, int toParentFd, int fromParentFd) {
+    runGuardedWorkerLoop(args, nullptr, toParentFd, fromParentFd);
+}
+
+void runInheritedWorker(const Args & args, Evaluator & evaluator,
+                        int toParentFd, int fromParentFd) {
+    runGuardedWorkerLoop(args, &evaluator, toParentFd, fromParentFd);
 }
 
 } // namespace nixcieval

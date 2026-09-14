@@ -36,7 +36,12 @@ nix_deps = [
 # their own.
 core_lib = static_library(
   'nix-ci-eval-core',
-  ['src/pure.cc', 'src/args.cc', 'src/line_io.cc'],
+  [
+    'src/pure.cc',
+    'src/args.cc',
+    'src/line_io.cc',
+    'src/fd_passing.cc',
+  ],
 )
 
 # Everything that links the Nix evaluator.
@@ -61,6 +66,14 @@ pure_test = executable(
   include_directories : include_directories('src'),
 )
 test('pure', pure_test)
+
+fd_passing_test = executable(
+  'fd-passing-test',
+  'test/fd_passing_test.cc',
+  link_with : core_lib,
+  include_directories : include_directories('src'),
+)
+test('fd-passing', fd_passing_test)
 
 # Links the Nix evaluator so it can parse real flake references and check which
 # ones shallowIfRemoteGit marks for a shallow fetch. It never fetches, so it

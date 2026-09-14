@@ -41,13 +41,14 @@ core_lib = static_library(
     'src/args.cc',
     'src/line_io.cc',
     'src/fd_passing.cc',
+    'src/trace.cc',
   ],
 )
 
 # Everything that links the Nix evaluator.
 nix_lib = static_library(
   'nix-ci-eval-nix',
-  ['src/nix_eval.cc', 'src/worker.cc', 'src/coordinator.cc'],
+  ['src/nix_eval.cc', 'src/worker.cc', 'src/substrate_host.cc', 'src/coordinator.cc'],
   dependencies : nix_deps,
 )
 

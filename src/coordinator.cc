@@ -807,8 +807,11 @@ int runCoordinator(const Args & args) {
             return;
         }
 
-        if (worker.pid > 0) {
+        if (worker.pid > 0 && !worker.forkedByHost) {
             // Ensure the worker is really gone so shutdown() cannot block.
+            // Only for a worker this process forked: one the host forked is
+            // reaped over there, so by now its pid may mean another process,
+            // and waiting for it is not something shutdown() does anyway.
             kill(worker.pid, SIGKILL);
         }
         worker.shutdown();
@@ -862,14 +865,21 @@ int runCoordinator(const Args & args) {
             fatalMessage = parsed.value("error", "the substrate host failed");
             return;
         }
-        // Anything else, "cannotFork" included, means this host is done. One
-        // that never got as far as ready is replaced once; after that, and
-        // for one that bowed out later, the run forks its own workers.
-        bool neverReady = !host.ready;
-        host.shutdown();
-        if (neverReady && hostAttempts < kMaxHostAttempts) {
-            startHost();
+        // Anything else, "cannotFork" included, means this host has nothing
+        // more to offer. One that never got as far as ready is stopped and
+        // replaced once, which is the cheapest way to load a flake that had
+        // to be fetched twice.
+        if (!host.ready) {
+            host.shutdown();
+            if (hostAttempts < kMaxHostAttempts) {
+                startHost();
+            }
+            return;
         }
+        // One that got that far has workers, and they die with it, so it is
+        // left running and merely stopped being asked for anything. It is
+        // killed with the rest of the pool at the end of the run.
+        host.usable = false;
     };
 
     // How long to wait for worker output before reconsidering the pool size.
@@ -1044,8 +1054,15 @@ int runCoordinator(const Args & args) {
     // grown a worker that is still loading the flake while the others drained
     // the queue, and waiting for it would hold every result back for no
     // reason. Workers keep nothing that needs flushing, so kill them all.
+    //
+    // The host goes first, because every worker it forked dies with it. That
+    // leaves only the workers this process forked itself to be signalled, and
+    // those are the only ones whose pid it can be sure still means them: a
+    // worker the host forked is reaped over there, and a pid this process
+    // never waited for could by then belong to something else.
+    host.shutdown();
     for (auto & worker : workers) {
-        if (worker.pid > 0) {
+        if (worker.pid > 0 && !worker.forkedByHost) {
             kill(worker.pid, SIGKILL);
         }
     }

@@ -82,6 +82,21 @@
                 touch $out
               '';
 
+          # Kills the substrate host mid-run and asserts every output is
+          # still reported: workers forked by the host die with it, so the run
+          # has to fork its own and hand their attributes back out.
+          nix-ci-eval-host-death-test =
+            pkgs.runCommand "nix-ci-eval-host-death-test"
+              {
+                nativeBuildInputs = [ pkgs.procps ];
+                NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+              }
+              ''
+                export HOME=$TMPDIR
+                bash ${./test}/hostdeath/run.sh
+                touch $out
+              '';
+
           # Evaluates a deep-but-finite flake attribute under an 8 MiB soft
           # stack limit and asserts the worker discovers it rather than
           # overflowing, which asserts the tool raises the evaluation stack the

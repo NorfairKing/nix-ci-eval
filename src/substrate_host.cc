@@ -87,6 +87,32 @@ bool bowOutUnlessSingleThreaded(int controlFd) {
     return false;
 }
 
+// Stop, once there is nothing left this process can do for the run.
+//
+// Only while it has forked no workers. Every worker it forked dies with it,
+// and a worker part-way through an attribute is worth more than the memory
+// this process is holding: the run would have to evaluate that attribute
+// again on a worker that has to load the flake for itself first.
+[[noreturn]] void stopOrIdle(int controlFd, std::size_t workersForked) {
+    if (workersForked == 0) {
+        std::_Exit(0);
+    }
+    while (true) {
+        FdMessage request = receiveWithFds(controlFd, kFdsPerRequest);
+        if (request.closed) {
+            std::_Exit(0);
+        }
+        for (int fd : request.fds) {
+            close(fd);
+        }
+        json cannot;
+        cannot["t"] = "cannotFork";
+        if (!tell(controlFd, cannot)) {
+            std::_Exit(0);
+        }
+    }
+}
+
 // Fork one worker that serves requests on the endpoints the coordinator sent.
 // Returns the worker's pid in the host; the worker itself never returns.
 pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
@@ -149,7 +175,7 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
     }
 
     if (!bowOutUnlessSingleThreaded(controlFd)) {
-        std::_Exit(0);
+        stopOrIdle(controlFd, 0);
     }
 
     // Nothing here waits for a worker, so let the kernel reap them rather than
@@ -161,6 +187,10 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
     if (!tell(controlFd, ready)) {
         std::_Exit(0);
     }
+
+    // Workers forked so far, which is what decides whether this process may
+    // stop: they die with it.
+    std::size_t workersForked = 0;
 
     while (true) {
         FdMessage request = receiveWithFds(controlFd, kFdsPerRequest);
@@ -184,17 +214,23 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
             continue;
         }
 
-        if (parsed.contains("exit")) {
-            std::_Exit(0);
-        }
-
         // Forcing everything on the way to an attribute the run has already
         // seen through is what makes the next worker warm: the coordinator
         // names an attribute that turned out to be a derivation, and this
         // leaves what it shares forced in the heap every later worker
         // inherits. The coordinator forks nothing while it waits for this.
         if (parsed.contains("prime")) {
-            auto attrPath = parsed.at("prime").get<std::vector<std::string>>();
+            std::vector<std::string> attrPath;
+            try {
+                attrPath = parsed.at("prime").get<std::vector<std::string>>();
+            } catch (const std::exception &) {
+                // A request this cannot read is one it cannot answer, and
+                // saying so is all it owes the coordinator.
+                json cannot;
+                cannot["t"] = "cannotFork";
+                tell(controlFd, cannot);
+                continue;
+            }
             auto started = std::chrono::steady_clock::now();
             evaluator->forceSubstrateFor(attrPath);
             if (traceEnabled()) {
@@ -225,10 +261,13 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
         if (!bowOutUnlessSingleThreaded(controlFd)) {
             close(fromCoordinatorFd);
             close(toCoordinatorFd);
-            std::_Exit(0);
+            stopOrIdle(controlFd, workersForked);
         }
         pid_t pid = forkInheritedWorker(args, *evaluator, controlFd,
                                         fromCoordinatorFd, toCoordinatorFd);
+        if (pid > 0) {
+            workersForked++;
+        }
         // The worker holds these now; the host keeping them open would keep
         // the coordinator from ever seeing that worker's pipe close.
         close(fromCoordinatorFd);

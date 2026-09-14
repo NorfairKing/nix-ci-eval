@@ -101,20 +101,27 @@ json jobToJson(const std::vector<std::string> & attrPath,
 
     std::unique_ptr<Evaluator> owned;
     Evaluator * evaluator = inherited;
-    try {
-        if (evaluator == nullptr) {
+    if (evaluator == nullptr) {
+        try {
             owned = std::make_unique<Evaluator>(args);
-            evaluator = owned.get();
-        } else {
-            // The evaluator came across a fork, so its heap is warm and its
-            // store handles belong to the process it came from.
-            evaluator->reopenStoreAfterFork();
+        } catch (const std::exception & e) {
+            fatalToParent(toParentFd,
+                          "failed to evaluate flake: " +
+                              truncateForLine(cleanErrorMessage(e.what()),
+                                              kMaxMessageBytes));
         }
-    } catch (const std::exception & e) {
-        fatalToParent(
-            toParentFd,
-            "failed to evaluate flake: " +
-                truncateForLine(cleanErrorMessage(e.what()), kMaxMessageBytes));
+        evaluator = owned.get();
+    } else {
+        // The evaluator came across a fork, so its heap is warm and its store
+        // handles belong to the process it was forked from.
+        try {
+            evaluator->reopenStoreAfterFork();
+        } catch (const std::exception & e) {
+            fatalToParent(toParentFd,
+                          "failed to open the store: " +
+                              truncateForLine(cleanErrorMessage(e.what()),
+                                              kMaxMessageBytes));
+        }
     }
 
     while (true) {

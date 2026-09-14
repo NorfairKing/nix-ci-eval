@@ -324,6 +324,11 @@ void forkSubstrateHost(const Args & args, SubstrateHost & host) {
 // by forking its own.
 struct HostCannotFork {};
 
+// The most a request to the host may occupy. Its receiving end reads into a
+// fixed buffer, and a message larger than that arrives truncated rather than
+// split, so this is kept well under it.
+constexpr std::size_t kMaxHostRequestBytes = 3072;
+
 // How long to wait for the host to answer a fork request. It evaluates nothing
 // once it is ready, so the answer is immediate; the bound is only so that a
 // wedged host costs the run a fallback rather than the run.
@@ -537,7 +542,11 @@ int runCoordinator(const Args & args) {
     // is the worker being replaced, if any, whose descriptors a worker the
     // coordinator forks itself must not inherit.
     auto spawnWorker = [&](const Worker * replacing) -> Worker {
-        if (host.usable && host.ready) {
+        // Not while the host is forcing what an attribute shares: it answers
+        // nothing until it is done, and that can take as long as evaluating an
+        // attribute does. A worker forked here instead loads the flake
+        // itself, which is what every worker used to do.
+        if (host.usable && host.ready && !host.priming) {
             try {
                 return forkWorkerViaHost(host);
             } catch (const HostCannotFork &) {
@@ -613,7 +622,14 @@ int runCoordinator(const Args & args) {
         }
         json request;
         request["prime"] = attrPath;
-        if (!sendWithFds(host.controlFd, dumpLossy(request), {})) {
+        std::string rendered = dumpLossy(request);
+        // One send is one receive, and the receiving end reads into a fixed
+        // buffer, so an attribute path long enough to overflow it would arrive
+        // truncated. Such an attribute is not worth priming for.
+        if (rendered.size() > kMaxHostRequestBytes) {
+            return;
+        }
+        if (!sendWithFds(host.controlFd, rendered, {})) {
             host.usable = false;
             return;
         }
@@ -778,6 +794,13 @@ int runCoordinator(const Args & args) {
     // fork workers, and otherwise only speaks up when something has gone
     // wrong; either way the run continues, with its own workers if it must.
     auto handleHostMessage = [&]() {
+        // The message may already have been taken: forking a worker reads this
+        // socket too, and can have done so between poll() and here. Reading
+        // then would block the whole run on a message that has been handled.
+        pollfd waiting{host.controlFd, POLLIN, 0};
+        if (poll(&waiting, 1, 0) <= 0) {
+            return;
+        }
         FdMessage message;
         try {
             message = receiveWithFds(host.controlFd, 0);

@@ -201,10 +201,16 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
         try {
             parsed = json::parse(request.message);
         } catch (const std::exception &) {
+            // A request this cannot read is a request it cannot answer, but it
+            // is not the run's problem: the coordinator forks its own workers
+            // once it hears this, and discovers everything either way.
             for (int fd : request.fds) {
                 close(fd);
             }
-            fatalToCoordinator(controlFd, "could not parse fork request");
+            json cannot;
+            cannot["t"] = "cannotFork";
+            tell(controlFd, cannot);
+            continue;
         }
 
         if (parsed.contains("exit")) {
@@ -237,8 +243,10 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
             for (int fd : request.fds) {
                 close(fd);
             }
-            fatalToCoordinator(controlFd,
-                               "fork request did not carry a worker's pipes");
+            json cannot;
+            cannot["t"] = "cannotFork";
+            tell(controlFd, cannot);
+            continue;
         }
 
         int fromCoordinatorFd = request.fds[0];

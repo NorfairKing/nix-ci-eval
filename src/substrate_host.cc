@@ -74,39 +74,6 @@ bool isSingleThreaded() {
     return threads == 1;
 }
 
-// Fetch whatever the flake needs, in a child process that then exits.
-//
-// Downloading starts nix's file-transfer thread, and that thread lives as long
-// as the process it was started in. A thread does not survive a fork, so a
-// worker forked from a host that had downloaded anything would inherit a file
-// transfer with nothing behind it and hang on the first thing it asked for.
-// The host refuses to fork workers at all in that case, which costs the run
-// the whole point of having a host: a cold store is exactly when a worker is
-// most expensive.
-//
-// Paying for the fetch over here leaves the store and the fetcher cache warm
-// and this process untouched, so that loading the flake below downloads
-// nothing.
-void prefetchFlake(const Args & args) {
-    pid_t pid = fork();
-    if (pid < 0) {
-        // Nothing gained; the host loads the flake itself either way.
-        return;
-    }
-    if (pid == 0) {
-        try {
-            fetchFlake(args);
-        } catch (const std::exception &) {
-            // A flake that cannot be fetched is reported by the host, which is
-            // about to try the same thing and fail the same way.
-        }
-        std::_Exit(0);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-    }
-}
-
 // Whether this process may still fork, telling the coordinator when it may
 // not so that it can fork its own workers instead. Asked again before every
 // fork, because evaluating anything can be what starts a thread.
@@ -154,12 +121,6 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
 }
 
 [[noreturn]] void runSubstrateHostLoop(const Args & args, int controlFd) {
-    auto hostStarted = std::chrono::steady_clock::now();
-    prefetchFlake(args);
-    if (traceEnabled()) {
-        fprintf(stderr, "trace host fetched the flake in %.3fs\n",
-                traceSecondsSince(hostStarted));
-    }
     std::unique_ptr<Evaluator> evaluator;
     try {
         auto loadStarted = std::chrono::steady_clock::now();

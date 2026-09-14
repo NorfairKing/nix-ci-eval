@@ -368,13 +368,6 @@ void Evaluator::forceSubstrate() { impl_->forceSubstrate(); }
 
 void Evaluator::reopenStoreAfterFork() { impl_->reopenStoreAfterFork(); }
 
-void fetchFlake(const Args & args) {
-    auto store = nix::openStore();
-    auto state = nix::make_ref<nix::EvalState>(
-        nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings);
-    lockFlakeForDiscovery(*state, args);
-}
-
 void initNixRuntime(const Args & args) {
     // Evaluate with the same stack the `nix` CLI gives itself. A worker
     // inherits the default 8 MiB stack, but a deep-but-finite flake (nested

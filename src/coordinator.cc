@@ -64,6 +64,12 @@ RunTrace trace;
 // segfault or get OOM-killed).
 constexpr int kMaxStartupFailures = 3;
 
+// How many substrate hosts a run will start before it gives up on having one
+// and forks its own workers. Two: the first may have had to fetch the flake,
+// which is what leaves it unable to fork, and the second then finds it
+// fetched.
+constexpr std::size_t kMaxHostAttempts = 2;
+
 // How deep an attribute path may get before the walk refuses to go further.
 // Real outputs sit three levels down (packages.<system>.<name>) and a flake
 // that groups them nests a few more, so this is far past anything meaningful
@@ -485,15 +491,25 @@ int runCoordinator(const Args & args) {
     // worker. Forked before anything else, so that it inherits no pipes and
     // starts loading while the coordinator is still setting up.
     SubstrateHost host;
-    try {
-        forkSubstrateHost(args, host);
-    } catch (const std::exception & e) {
-        // Without it every worker loads the flake itself, which is what this
-        // tool did before there was a host: slower, and correct.
-        fprintf(stderr,
-                "nix-ci-eval: cannot share the evaluation substrate: %s\n",
-                e.what());
-    }
+    // A host that never became ready is worth starting once more, because the
+    // usual reason one bows out is that loading the flake downloaded
+    // something, and downloading is what leaves a background thread behind.
+    // The store and the fetcher cache are warm by then, so the next host loads
+    // the same flake without fetching, and so without the thread.
+    std::size_t hostAttempts = 0;
+    auto startHost = [&]() {
+        hostAttempts++;
+        try {
+            forkSubstrateHost(args, host);
+        } catch (const std::exception & e) {
+            // Without a host every worker loads the flake itself, which is
+            // what this tool did before there was one: slower, and correct.
+            fprintf(stderr,
+                    "nix-ci-eval: cannot share the evaluation substrate: %s\n",
+                    e.what());
+        }
+    };
+    startHost();
 
     std::size_t maxWorkers = maxWorkerCount(args);
     // A deque rather than a vector: the poll loop and the crash handler both
@@ -846,9 +862,14 @@ int runCoordinator(const Args & args) {
             fatalMessage = parsed.value("error", "the substrate host failed");
             return;
         }
-        // Anything else, "cannotFork" included, means the run forks its own
-        // workers from here on.
-        host.usable = false;
+        // Anything else, "cannotFork" included, means this host is done. One
+        // that never got as far as ready is replaced once; after that, and
+        // for one that bowed out later, the run forks its own workers.
+        bool neverReady = !host.ready;
+        host.shutdown();
+        if (neverReady && hostAttempts < kMaxHostAttempts) {
+            startHost();
+        }
     };
 
     // How long to wait for worker output before reconsidering the pool size.

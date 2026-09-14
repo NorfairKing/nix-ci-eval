@@ -102,14 +102,6 @@ class Evaluator {
     Impl * impl_;
 };
 
-// Fetch the flake and its inputs, without evaluating any of it.
-//
-// Fetching is the step that downloads, and downloading starts a background
-// thread that lives as long as the process. Doing it in a process that then
-// exits leaves the store and the fetcher cache warm for a process that must
-// stay free of such threads because it is going to fork.
-void fetchFlake(const Args & args);
-
 // One-time process-global Nix initialisation (GC, settings). Call once before
 // constructing any Evaluator.
 void initNixRuntime(const Args & args);

@@ -107,6 +107,19 @@ void prefetchFlake(const Args & args) {
     }
 }
 
+// Whether this process may still fork, telling the coordinator when it may
+// not so that it can fork its own workers instead. Asked again before every
+// fork, because evaluating anything can be what starts a thread.
+bool bowOutUnlessSingleThreaded(int controlFd) {
+    if (isSingleThreaded()) {
+        return true;
+    }
+    json cannot;
+    cannot["t"] = "cannotFork";
+    tell(controlFd, cannot);
+    return false;
+}
+
 // Fork one worker that serves requests on the endpoints the coordinator sent.
 // Returns the worker's pid in the host; the worker itself never returns.
 pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
@@ -162,13 +175,6 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
                 truncateForLine(cleanErrorMessage(e.what()), kMaxMessageBytes));
     }
 
-    if (!isSingleThreaded()) {
-        json unsafe;
-        unsafe["t"] = "cannotFork";
-        tell(controlFd, unsafe);
-        std::_Exit(0);
-    }
-
     // Force something, anything, before the first worker is forked: whatever
     // the run turns out to work on, it shares most of its derivation graph
     // with the first derivation in the flake.
@@ -179,6 +185,10 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
             fprintf(stderr, "trace host forced the substrate in %.3fs\n",
                     traceSecondsSince(started));
         }
+    }
+
+    if (!bowOutUnlessSingleThreaded(controlFd)) {
+        std::_Exit(0);
     }
 
     // Nothing here waits for a worker, so let the kernel reap them rather than
@@ -251,6 +261,11 @@ pid_t forkInheritedWorker(const Args & args, Evaluator & evaluator,
 
         int fromCoordinatorFd = request.fds[0];
         int toCoordinatorFd = request.fds[1];
+        if (!bowOutUnlessSingleThreaded(controlFd)) {
+            close(fromCoordinatorFd);
+            close(toCoordinatorFd);
+            std::_Exit(0);
+        }
         pid_t pid = forkInheritedWorker(args, *evaluator, controlFd,
                                         fromCoordinatorFd, toCoordinatorFd);
         // The worker holds these now; the host keeping them open would keep

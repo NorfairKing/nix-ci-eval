@@ -269,9 +269,10 @@ struct SubstrateHost {
             controlFd = -1;
         }
         if (pid > 0) {
-            if (kill(pid, SIGKILL) != 0 && errno == ESRCH) {
-                // Already gone; still reap it below.
-            }
+            // It is only ever killed, never asked to stop: it holds nothing
+            // that needs flushing, and a host part-way through forcing an
+            // attribute would otherwise be waited out.
+            kill(pid, SIGKILL);
             int status = 0;
             while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
@@ -393,12 +394,21 @@ Worker forkWorkerViaHost(SubstrateHost & host) {
         }
         break;
     }
-    if (answer.value("t", "") != "forked") {
+    pid_t forkedPid = -1;
+    try {
+        if (answer.value("t", "") != "forked") {
+            giveUp();
+        }
+        forkedPid = answer.at("pid").get<pid_t>();
+    } catch (const HostCannotFork &) {
+        throw;
+    } catch (const std::exception &) {
+        // An answer without a usable pid is an answer this cannot act on.
         giveUp();
     }
 
     Worker worker;
-    worker.pid = answer.at("pid").get<pid_t>();
+    worker.pid = forkedPid;
     worker.forkedByHost = true;
     worker.toChildFd = toChild[1];
     worker.fromChild = std::make_unique<LineReader>(fromChild[0]);

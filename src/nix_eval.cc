@@ -21,8 +21,11 @@
 #include <nix/store/globals.hh>
 #include <nix/store/store-api.hh>
 #include <nix/store/store-open.hh>
+#include <nix/util/canon-path.hh>
 #include <nix/util/configuration.hh>
 #include <nix/util/current-process.hh>
+#include <nix/util/mounted-source-accessor.hh>
+#include <nix/util/source-accessor.hh>
 #include <nix/util/terminal.hh>
 
 #include "pure.hh"
@@ -115,9 +118,33 @@ nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow) {
         flakeRef.subdir);
 }
 
+// Lock the flake this run is to discover, which is the step that fetches it
+// and its inputs.
+//
+// Read-only: never update, write, or fetch from registries, and require the
+// flake to be fully locked.
+nix::flake::LockedFlake lockFlakeForDiscovery(nix::EvalState & state,
+                                              const Args & args) {
+    auto flakeRef =
+        shallowIfRemoteGit(nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
+                                              std::filesystem::current_path()),
+                           args.shallow);
+    nix::flake::LockFlags lockFlags;
+    lockFlags.updateLockFile = false;
+    lockFlags.writeLockFile = false;
+    lockFlags.useRegistries = false;
+    lockFlags.allowUnlocked = false;
+    return nix::flake::lockFlake(nix::flakeSettings, state, flakeRef,
+                                 lockFlags);
+}
+
 struct Evaluator::Impl {
     Args args;
     nix::ref<nix::Store> store;
+    // Stores this evaluator no longer uses but must not destroy: the one
+    // inherited across a fork is still in use by the process that was forked,
+    // whose handles its destructor would act on.
+    std::vector<nix::ref<nix::Store>> retiredStores;
     nix::ref<nix::EvalState> state;
     nix::Value * root;
 
@@ -126,19 +153,7 @@ struct Evaluator::Impl {
           state(nix::make_ref<nix::EvalState>(
               nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings)),
           root(nullptr) {
-        auto flakeRef = shallowIfRemoteGit(
-            nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
-                               std::filesystem::current_path()),
-            args.shallow);
-        // Read-only locking: never update, write, or fetch from registries,
-        // and require the flake to be fully locked.
-        nix::flake::LockFlags lockFlags;
-        lockFlags.updateLockFile = false;
-        lockFlags.writeLockFile = false;
-        lockFlags.useRegistries = false;
-        lockFlags.allowUnlocked = false;
-        auto locked = nix::flake::lockFlake(nix::flakeSettings, *state,
-                                            flakeRef, lockFlags);
+        auto locked = lockFlakeForDiscovery(*state, args);
         auto * flakeValue = state->allocValue();
         nix::flake::callFlake(*state, locked, *flakeValue);
 
@@ -149,6 +164,62 @@ struct Evaluator::Impl {
         root = state->allocValue();
         state->callFunction(selectFun, *flakeValue, *root, nix::noPos);
         state->forceAttrs(*root, nix::noPos, "the discovery root");
+    }
+
+    // Force one attribute as far as a worker would, short of asking the
+    // store what is already built.
+    //
+    // Navigating forces every level on the way, which is where one kind of
+    // shared work lives: reaching a package forces the package set it came
+    // from. The store path is where the other kind lives, and it is the
+    // larger one: computing it forces the derivation's inputs, and theirs,
+    // which is the package set's derivation graph underneath this attribute
+    // and is almost entirely shared with the next attribute.
+    //
+    // What it stops short of is the cache-status query, which is this
+    // attribute's alone and, without a daemon to ask, would put a file
+    // transfer and its background thread in a process that is about to fork.
+    void forceAsAWorkerWould(nix::Value & value) {
+        auto packageInfo = nix::getDerivation(*state, value, false);
+        if (!packageInfo) {
+            return;
+        }
+        packageInfo->requireDrvPath();
+    }
+
+    void forceSubstrateFor(const std::vector<std::string> & attrPath) {
+        try {
+            nix::Value * value = navigate(attrPath);
+            if (value == nullptr) {
+                return;
+            }
+            forceAsAWorkerWould(*value);
+        } catch (const std::exception &) {
+            // An attribute that cannot be evaluated leaves the evaluator as
+            // warm as it got. The worker that is handed it reports the
+            // failure; this is not the place to.
+        }
+    }
+
+    void reopenStoreAfterFork() {
+        auto fresh = nix::openStore();
+
+        retiredStores.push_back(store);
+        store = fresh;
+
+        // Reading a store path during evaluation goes through this accessor,
+        // which checks the path against the store it was made from. Left
+        // alone it would send every such check to the inherited store.
+        state->storeFS->mount(nix::CanonPath(fresh->storeDir),
+                              fresh->getFSAccessor(nix::evalSettings.pureEval));
+
+        // EvalState declares the stores it writes derivations through const,
+        // and nix offers no supported way to replace them, so this writes
+        // through that const. The alternative is to let every forked worker
+        // share one daemon connection, which is a socket they would interleave
+        // on, or one SQLite connection, which they would corrupt.
+        const_cast<nix::ref<nix::Store> &>(state->store) = fresh;
+        const_cast<nix::ref<nix::Store> &>(state->buildStore) = fresh;
     }
 
     // Navigate from the root to an attribute path, forcing each level. Returns
@@ -238,6 +309,12 @@ Evaluator::~Evaluator() { delete impl_; }
 EvalOutcome Evaluator::evalAttr(const std::vector<std::string> & attrPath) {
     return impl_->evalAttr(attrPath);
 }
+
+void Evaluator::forceSubstrateFor(const std::vector<std::string> & attrPath) {
+    impl_->forceSubstrateFor(attrPath);
+}
+
+void Evaluator::reopenStoreAfterFork() { impl_->reopenStoreAfterFork(); }
 
 void initNixRuntime(const Args & args) {
     // Evaluate with the same stack the `nix` CLI gives itself. A worker

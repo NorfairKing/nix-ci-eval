@@ -36,7 +36,13 @@ nix_deps = [
 # their own.
 core_lib = static_library(
   'nix-ci-eval-core',
-  ['src/pure.cc', 'src/args.cc', 'src/line_io.cc'],
+  [
+    'src/pure.cc',
+    'src/args.cc',
+    'src/line_io.cc',
+    'src/proc.cc',
+    'src/trace.cc',
+  ],
 )
 
 # Everything that links the Nix evaluator.

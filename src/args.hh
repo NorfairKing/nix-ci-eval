@@ -24,8 +24,10 @@ struct Args {
     // a worker and the size of the backlog. Absent means "as many as the
     // machine has cores".
     std::optional<std::size_t> workers;
-    // Per-worker resident-memory ceiling in MiB; a worker that exceeds it is
-    // restarted between jobs.
+    // Per-worker memory ceiling in MiB; a worker that exceeds it is restarted
+    // between jobs. Counts what a worker holds on its own, not the evaluator
+    // it shares with the rest of the pool, which is held once however many
+    // workers are looking at it.
     std::size_t maxMemoryMiB = 4096;
     // After discovery, emit the dependency edges between discovered outputs.
     bool dependencies = true;

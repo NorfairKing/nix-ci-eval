@@ -276,6 +276,67 @@ int main() {
     }
 
     {
+        // What a worker costs on top of the evaluator it inherited is the
+        // private part of what it holds; the shared part is held once however
+        // many workers are looking at it.
+        const std::string rollup = "Rss:             1048576 kB\n"
+                                   "Pss:              524288 kB\n"
+                                   "Shared_Clean:          0 kB\n"
+                                   "Shared_Dirty:     524288 kB\n"
+                                   "Private_Clean:      1024 kB\n"
+                                   "Private_Dirty:   1047552 kB\n";
+        expectBool("private pages are summed and scaled to MiB",
+                   privateMiBFromSmapsRollup(rollup) ==
+                       std::optional<std::size_t>(1024),
+                   true);
+        expectBool("shared pages are not counted",
+                   privateMiBFromSmapsRollup(rollup) !=
+                       std::optional<std::size_t>(1536),
+                   true);
+        // Without the file there is no split to make, and the caller falls
+        // back to resident size rather than reading zero and never recycling
+        // a worker.
+        expectBool("contents without either field read as nothing",
+                   privateMiBFromSmapsRollup("Rss: 1048576 kB\n") ==
+                       std::nullopt,
+                   true);
+        expectBool("empty contents read as nothing",
+                   privateMiBFromSmapsRollup("") == std::nullopt, true);
+        expectBool("one field of the two is still an answer",
+                   privateMiBFromSmapsRollup("Private_Dirty:   2097152 kB\n") ==
+                       std::optional<std::size_t>(2048),
+                   true);
+    }
+
+    {
+        // A child inherits no threads, so a run has to notice when loading
+        // the flake started one: that is what makes its evaluator something
+        // no worker may take over.
+        expectBool("the thread count is read out of the status",
+                   threadsFromProcStatus("Name:\tnix-ci-eval\nThreads:\t17\n"
+                                         "VmRSS:\t   58780 kB\n") ==
+                       std::optional<std::size_t>(17),
+                   true);
+        expectBool("a single-threaded process reads as one",
+                   threadsFromProcStatus("Threads:\t1\n") ==
+                       std::optional<std::size_t>(1),
+                   true);
+        expectBool("spaces are tolerated where the kernel uses a tab",
+                   threadsFromProcStatus("Threads:   4\n") ==
+                       std::optional<std::size_t>(4),
+                   true);
+        // Nothing rather than zero: a caller that cannot read this must take
+        // the unsafe answer, not the reassuring one.
+        expectBool("status without the field reads as nothing",
+                   threadsFromProcStatus("Name:\tnix-ci-eval\n") ==
+                       std::nullopt,
+                   true);
+        expectBool("a non-numeric count reads as nothing",
+                   threadsFromProcStatus("Threads:\tmany\n") == std::nullopt,
+                   true);
+    }
+
+    {
         // A worker dying is not evidence that the attribute it held is
         // broken, so the attribute goes back for another worker; an attribute
         // that keeps killing workers eventually stops.

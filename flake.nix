@@ -67,6 +67,22 @@
                 touch $out
               '';
 
+          # Runs the built tool against a fixture whose outputs share one
+          # expensive value, at two pool sizes, and asserts that value is
+          # forced the same bounded number of times either way rather than
+          # once per worker. Hermetic: the fixture has no inputs, and the tool
+          # manages its own throwaway store.
+          nix-ci-eval-substrate-test =
+            pkgs.runCommand "nix-ci-eval-substrate-test"
+              {
+                NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+              }
+              ''
+                export HOME=$TMPDIR
+                bash ${./test/substrate}/run.sh
+                touch $out
+              '';
+
           # Evaluates a deep-but-finite flake attribute under an 8 MiB soft
           # stack limit and asserts the worker discovers it rather than
           # overflowing, which asserts the tool raises the evaluation stack the

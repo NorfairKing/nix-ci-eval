@@ -314,6 +314,20 @@ int runCoordinator(const Args & args) {
     // would wait forever on its first fetch. Loading a flake that had to be
     // fetched is what starts it, so that is the case where workers go on
     // loading the flake themselves, as they did before this was here.
+    // Force what the outputs share before forking anything, so that the
+    // first worker is warm too and nothing has to be forced again later
+    // while the run waits. There is nothing else to be doing: no worker
+    // exists yet, and the one that would have been forked first would have
+    // spent this time forcing the same thing for itself.
+    {
+        auto started = std::chrono::steady_clock::now();
+        evaluator->forceSubstrate();
+        if (traceEnabled()) {
+            fprintf(stderr, "trace %.3f forced the substrate in %.3fs\n",
+                    traceSecondsSince(trace.start), traceSecondsSince(started));
+        }
+    }
+
     auto threadsAfterLoading = currentThreadCount();
     bool startedAThread = !threadsBeforeLoading || !threadsAfterLoading ||
                           *threadsAfterLoading > *threadsBeforeLoading;
@@ -321,7 +335,7 @@ int runCoordinator(const Args & args) {
     // they must not.
     Evaluator * shared = startedAThread ? nullptr : evaluator.get();
     if (traceEnabled()) {
-        fprintf(stderr, "trace %.3f loaded the flake%s\n",
+        fprintf(stderr, "trace %.3f loaded and forced the flake%s\n",
                 traceSecondsSince(trace.start),
                 shared == nullptr ? " (workers cannot take it over)" : "");
     }

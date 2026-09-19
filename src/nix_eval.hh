@@ -61,6 +61,13 @@ class Evaluator {
     // Throws on evaluation failure.
     EvalOutcome evalAttr(const std::vector<std::string> & attrPath);
 
+    // Force the first derivation the discovery root can reach, so that the
+    // very first worker is warm too, before any attribute has been reported
+    // and so before there is one to name. It can reach a cheaper corner of
+    // the flake than the run goes on to work in, which is what
+    // forceSubstrateFor is for afterwards.
+    void forceSubstrate();
+
     // Force everything on the way to 'attrPath', so that a process forked from
     // this one inherits it instead of forcing it again. What lies on the way
     // (nixpkgs, the overlays, the package set the attribute came from) is what

@@ -86,6 +86,14 @@ std::string selectExpr(const std::string & system) {
            "}";
 }
 
+// How far from the discovery root the first-derivation walk may go, and how
+// many attributes it may visit. A real output sits three levels down
+// (packages.<system>.<name>) and a flake that groups its outputs nests a few
+// more; past that the walk is not going to find a derivation it was going to
+// find.
+constexpr std::size_t kSubstrateWalkDepth = 6;
+constexpr std::size_t kSubstrateWalkBudget = 256;
+
 } // namespace
 
 // Fetching a git flake ref pulls down every commit the requested one descends
@@ -187,6 +195,48 @@ struct Evaluator::Impl {
         packageInfo->requireDrvPath();
     }
 
+    // Force the first derivation reachable from the root, depth first and in
+    // lexicographic order, so that the very first worker is warm too. Bounded
+    // in both directions: past a few levels, or a couple of hundred
+    // attributes, this is not going to find a derivation it was going to
+    // find.
+    bool forceFirstDerivation(nix::Value & value, std::size_t depth,
+                              std::size_t & budget) {
+        if (budget == 0 || depth > kSubstrateWalkDepth) {
+            return false;
+        }
+        budget--;
+        state->forceValue(value, nix::noPos);
+        if (value.type() != nix::nAttrs) {
+            return false;
+        }
+        if (nix::getDerivation(*state, value, false)) {
+            forceAsAWorkerWould(value);
+            return true;
+        }
+        for (const auto & attr :
+             value.attrs()->lexicographicOrder(state->symbols)) {
+            try {
+                if (forceFirstDerivation(*attr->value, depth + 1, budget)) {
+                    return true;
+                }
+            } catch (const std::exception &) {
+                // An attribute that throws is one this walk steps over: it is
+                // here to warm the evaluator, and the worker that is handed
+                // that attribute is what reports the failure.
+            }
+        }
+        return false;
+    }
+
+    void forceSubstrate() {
+        std::size_t budget = kSubstrateWalkBudget;
+        try {
+            forceFirstDerivation(*root, 0, budget);
+        } catch (const std::exception &) {
+        }
+    }
+
     void forceSubstrateFor(const std::vector<std::string> & attrPath) {
         try {
             nix::Value * value = navigate(attrPath);
@@ -207,23 +257,25 @@ struct Evaluator::Impl {
         retiredStores.push_back(store);
         store = fresh;
 
-        // Reading a store path during evaluation goes through this accessor,
-        // which checks the path against the store it was made from. Left
-        // alone it would send every such check to the inherited store.
+        // Reading a store path during evaluation goes through this
+        // accessor, which checks the path against the store it was made
+        // from. Left alone it would send every such check to the inherited
+        // store.
         state->storeFS->mount(nix::CanonPath(fresh->storeDir),
                               fresh->getFSAccessor(nix::evalSettings.pureEval));
 
-        // EvalState declares the stores it writes derivations through const,
-        // and nix offers no supported way to replace them, so this writes
-        // through that const. The alternative is to let every forked worker
-        // share one daemon connection, which is a socket they would interleave
-        // on, or one SQLite connection, which they would corrupt.
+        // EvalState declares the stores it writes derivations through
+        // const, and nix offers no supported way to replace them, so this
+        // writes through that const. The alternative is to let every forked
+        // worker share one daemon connection, which is a socket they would
+        // interleave on, or one SQLite connection, which they would
+        // corrupt.
         const_cast<nix::ref<nix::Store> &>(state->store) = fresh;
         const_cast<nix::ref<nix::Store> &>(state->buildStore) = fresh;
     }
 
-    // Navigate from the root to an attribute path, forcing each level. Returns
-    // nullptr when a path component is missing.
+    // Navigate from the root to an attribute path, forcing each level.
+    // Returns nullptr when a path component is missing.
     nix::Value * navigate(const std::vector<std::string> & attrPath) {
         nix::Value * current = root;
         for (const auto & component : attrPath) {
@@ -246,15 +298,16 @@ struct Evaluator::Impl {
     // valid in the local store or substitutable from a configured cache.
     //
     // The substituter probe is batched across this derivation's outputs but
-    // deliberately not across jobs: each job's cache status is reported inline
-    // as it is discovered (the streaming contract), and cross-job batching
-    // would require buffering every job first. Cache status is already computed
-    // in parallel across the worker processes.
+    // deliberately not across jobs: each job's cache status is reported
+    // inline as it is discovered (the streaming contract), and cross-job
+    // batching would require buffering every job first. Cache status is
+    // already computed in parallel across the worker processes.
     bool queryIsCached(const nix::PackageInfo::Outputs & outputs) {
         nix::StorePathCAMap toQuery;
         for (const auto & [outputName, optPath] : outputs) {
             if (!optPath) {
-                // A content-addressed output with no static path: cannot tell.
+                // A content-addressed output with no static path: cannot
+                // tell.
                 return false;
             }
             if (!store->isValidPath(*optPath)) {
@@ -310,6 +363,8 @@ EvalOutcome Evaluator::evalAttr(const std::vector<std::string> & attrPath) {
     return impl_->evalAttr(attrPath);
 }
 
+void Evaluator::forceSubstrate() { impl_->forceSubstrate(); }
+
 void Evaluator::forceSubstrateFor(const std::vector<std::string> & attrPath) {
     impl_->forceSubstrateFor(attrPath);
 }
@@ -319,15 +374,15 @@ void Evaluator::reopenStoreAfterFork() { impl_->reopenStoreAfterFork(); }
 void initNixRuntime(const Args & args) {
     // Evaluate with the same stack the `nix` CLI gives itself. A worker
     // inherits the default 8 MiB stack, but a deep-but-finite flake (nested
-    // attribute sets, a large data literal, a value materialised from an IFD)
-    // recurses far enough in the evaluator to overflow that, and Nix turns a
-    // stack overflow into an uncatchable SIGSEGV: the worker dies and its
-    // attribute is reported as a crashed worker rather than discovered. The
-    // `nix` CLI raises the stack to 64 MiB before evaluating for exactly this
-    // reason, so `nix flake show` handled such flakes; matching it keeps
-    // discovery from regressing against what a caller could evaluate by hand.
-    // Raised here in the coordinator, before any worker is forked, so every
-    // worker inherits the larger limit.
+    // attribute sets, a large data literal, a value materialised from an
+    // IFD) recurses far enough in the evaluator to overflow that, and Nix
+    // turns a stack overflow into an uncatchable SIGSEGV: the worker dies
+    // and its attribute is reported as a crashed worker rather than
+    // discovered. The `nix` CLI raises the stack to 64 MiB before
+    // evaluating for exactly this reason, so `nix flake show` handled such
+    // flakes; matching it keeps discovery from regressing against what a
+    // caller could evaluate by hand. Raised here in the coordinator, before
+    // any worker is forked, so every worker inherits the larger limit.
     nix::setStackSize(64 * 1024 * 1024);
 
     nix::initNix();
@@ -343,7 +398,8 @@ void initNixRuntime(const Args & args) {
     nix::flakeSettings.configureEvalSettings(nix::evalSettings);
 
     // The build hook plus import-from-derivation can cause "unexpected EOF"
-    // during evaluation; discovery never builds, so disable remote builders.
+    // during evaluation; discovery never builds, so disable remote
+    // builders.
     nix::settings.getWorkerSettings().builders = "";
 
     if (args.impure) {
@@ -352,14 +408,14 @@ void initNixRuntime(const Args & args) {
         nix::evalSettings.pureEval = true;
     }
 
-    // Discovery allows import-from-derivation by default: an output that only
-    // resolves through IFD would otherwise be missed. A caller that wants to
-    // forbid it (e.g. a suite that opts out) passes
+    // Discovery allows import-from-derivation by default: an output that
+    // only resolves through IFD would otherwise be missed. A caller that
+    // wants to forbid it (e.g. a suite that opts out) passes
     // --no-import-from-derivation.
     nix::evalSettings.enableImportFromDerivation = args.importFromDerivation;
 
-    // Open the fetcher cache once in the parent so forked workers do not race
-    // to create it.
+    // Open the fetcher cache once in the parent so forked workers do not
+    // race to create it.
     nix::fetchSettings.getCache();
 }
 

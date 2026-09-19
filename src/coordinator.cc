@@ -30,7 +30,9 @@
 
 #include "line_io.hh"
 #include "nix_eval.hh"
+#include "proc.hh"
 #include "pure.hh"
+#include "trace.hh"
 #include "worker.hh"
 
 namespace nixcieval {
@@ -38,6 +40,22 @@ namespace nixcieval {
 namespace {
 
 using nlohmann::json;
+
+// What a run cost, for NIX_CI_EVAL_TRACE (see trace.hh). A worker's first
+// derivation is timed from its fork, because reaching it is what a worker
+// costs to start; every later one is timed from its dispatch, because that is
+// what an attribute costs once a worker is warm.
+struct RunTrace {
+    std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();
+    std::size_t forks = 0;
+    std::size_t firstResults = 0;
+    std::chrono::steady_clock::duration firstResultTotal{};
+    std::size_t warmAttrs = 0;
+    std::chrono::steady_clock::duration warmAttrTotal{};
+    std::size_t jobs = 0;
+};
+RunTrace trace;
 
 // A worker slot that crashes this many times before ever becoming ready aborts
 // the whole run, to bound a startup crash loop (e.g. the flake makes evaluation
@@ -135,7 +153,12 @@ struct Worker {
 // returns; the parent keeps the pipe endpoints. 'inheritedFds' are the
 // parent-side pipe descriptors of the other workers, which the child must
 // close so it does not keep their pipes open.
-Worker forkWorker(const Args & args, const std::vector<int> & inheritedFds) {
+//
+// 'inherited' is the evaluator the child is to take over, or null for a child
+// that is to build its own. Taking one over is what makes a worker cheap: the
+// flake is already loaded and what its outputs share is already forced.
+Worker forkWorker(const Args & args, Evaluator * inherited,
+                  const std::vector<int> & inheritedFds) {
     int toChild[2];
     int fromChild[2];
     if (pipe(toChild) != 0) {
@@ -185,8 +208,11 @@ Worker forkWorker(const Args & args, const std::vector<int> & inheritedFds) {
         for (int fd : inheritedFds) {
             close(fd);
         }
+        if (inherited != nullptr) {
+            runInheritedWorker(args, *inherited, fromChild[1], toChild[0]);
+        }
         runWorker(args, fromChild[1], toChild[0]);
-        // runWorker never returns.
+        // Neither of those returns.
     }
 
     // Parent.
@@ -197,6 +223,12 @@ Worker forkWorker(const Args & args, const std::vector<int> & inheritedFds) {
     worker.toChildFd = toChild[1];
     worker.fromChild = std::make_unique<LineReader>(fromChild[0]);
     worker.forkedAt = std::chrono::steady_clock::now();
+    trace.forks++;
+    if (traceEnabled()) {
+        fprintf(stderr, "trace %.3f forked worker %d (worker %zu, %s)\n",
+                traceSecondsSince(trace.start), (int)pid, trace.forks,
+                inherited != nullptr ? "warm" : "cold");
+    }
     return worker;
 }
 
@@ -259,6 +291,41 @@ void emitEdges(const std::vector<OutputEdge> & edges) {
 int runCoordinator(const Args & args) {
     initNixRuntime(args);
 
+    // Load the flake here, once, so that every worker forked below can take
+    // over an evaluator that has already done it. Loading the flake and
+    // forcing what its outputs share is what a worker spends almost all of
+    // its startup on, and none of it is specific to the worker: a pool of N
+    // used to pay for all of it N times.
+    auto threadsBeforeLoading = currentThreadCount();
+    std::unique_ptr<Evaluator> evaluator;
+    try {
+        evaluator = std::make_unique<Evaluator>(args);
+    } catch (const std::exception & e) {
+        // Every worker was going to fail at this, so failing here says it
+        // once rather than once per worker.
+        fprintf(stderr, "nix-ci-eval: failed to evaluate flake: %s\n",
+                cleanErrorMessage(e.what()).c_str());
+        return 1;
+    }
+
+    // A worker inherits this address space but none of the threads in it, so
+    // anything that answers on a thread of its own answers nothing over
+    // there: nix starts one to download with, and a worker that inherited it
+    // would wait forever on its first fetch. Loading a flake that had to be
+    // fetched is what starts it, so that is the case where workers go on
+    // loading the flake themselves, as they did before this was here.
+    auto threadsAfterLoading = currentThreadCount();
+    bool startedAThread = !threadsBeforeLoading || !threadsAfterLoading ||
+                          *threadsAfterLoading > *threadsBeforeLoading;
+    // The evaluator workers are to take over, or null once there is a reason
+    // they must not.
+    Evaluator * shared = startedAThread ? nullptr : evaluator.get();
+    if (traceEnabled()) {
+        fprintf(stderr, "trace %.3f loaded the flake%s\n",
+                traceSecondsSince(trace.start),
+                shared == nullptr ? " (workers cannot take it over)" : "");
+    }
+
     std::size_t maxWorkers = maxWorkerCount(args);
     // A deque rather than a vector: the poll loop and the crash handler both
     // hold Worker references across a fork, and growing a deque leaves those
@@ -287,6 +354,9 @@ int runCoordinator(const Args & args) {
     todo.push_back(PendingAttr{}); // the discovery root
     std::size_t active = 0;
 
+    // The top-level output types the shared evaluator has been warmed for.
+    std::set<std::string> primedOutputTypes;
+
     WorkerCostModel costModel;
     std::size_t evaluatedDerivations = 0;
     auto runStartedAt = std::chrono::steady_clock::now();
@@ -310,7 +380,7 @@ int runCoordinator(const Args & args) {
         if (!shouldSpawnWorker(poolSizing())) {
             return;
         }
-        workers.push_back(forkWorker(args, liveFdsExcept(nullptr)));
+        workers.push_back(forkWorker(args, shared, liveFdsExcept(nullptr)));
     };
 
     // (attr, drvPath) of every kept output, for optional dependency discovery.
@@ -347,6 +417,42 @@ int runCoordinator(const Args & args) {
         }
     };
 
+    // Force what an attribute shares, so that every worker forked after this
+    // inherits it rather than forcing it again.
+    //
+    // Once per top-level output type, and only for an attribute a worker has
+    // just reported as a derivation: reaching one package forces the package
+    // set it came from, but a flake's checks and its packages can be built
+    // from different ones. Naming an attribute the run has already seen
+    // through is also what keeps this from being where a bad attribute takes
+    // the run down: it evaluated on a worker moments ago.
+    //
+    // This blocks the run for as long as evaluating that attribute takes,
+    // which is why it is done at most once per output type and only after
+    // that attribute's result has already gone out.
+    auto primeFor = [&](const std::vector<std::string> & attrPath) {
+        if (shared == nullptr || attrPath.empty()) {
+            return;
+        }
+        if (!primedOutputTypes.insert(attrPath.front()).second) {
+            return;
+        }
+        auto threadsBefore = currentThreadCount();
+        auto started = std::chrono::steady_clock::now();
+        shared->forceSubstrateFor(attrPath);
+        auto threadsAfter = currentThreadCount();
+        if (traceEnabled()) {
+            fprintf(stderr, "trace %.3f forced what %s shares in %.3fs\n",
+                    traceSecondsSince(trace.start), attrPath.front().c_str(),
+                    traceSecondsSince(started));
+        }
+        // Forcing an attribute can fetch, and fetching is what starts the
+        // thread no worker can inherit.
+        if (!threadsBefore || !threadsAfter || *threadsAfter > *threadsBefore) {
+            shared = nullptr;
+        }
+    };
+
     auto handleLine = [&](Worker & worker, const std::string & raw) {
         json message = json::parse(raw);
         std::string kind = message.at("t");
@@ -358,7 +464,7 @@ int runCoordinator(const Args & args) {
         }
         if (kind == "restart") {
             worker.shutdown();
-            worker = forkWorker(args, liveFdsExcept(&worker));
+            worker = forkWorker(args, shared, liveFdsExcept(&worker));
             return;
         }
         if (kind == "fatal") {
@@ -373,10 +479,13 @@ int runCoordinator(const Args & args) {
         auto now = std::chrono::steady_clock::now();
         if (kind == "job") {
             evaluatedDerivations++;
+            trace.jobs++;
         }
         if (kind == "job" && worker.currentJob) {
             if (worker.producedADerivation) {
                 costModel.recordAttr(now - worker.jobStartedAt);
+                trace.warmAttrs++;
+                trace.warmAttrTotal += now - worker.jobStartedAt;
             } else {
                 // A worker's first derivation also paid for loading the flake
                 // and forcing the shared evaluation substrate, which together
@@ -385,6 +494,17 @@ int runCoordinator(const Args & args) {
                 // that starts up all at once has no warm worker to compare
                 // against, and averaging the two together would hide it.
                 costModel.recordFirstResult(now - worker.forkedAt);
+                trace.firstResults++;
+                trace.firstResultTotal += now - worker.forkedAt;
+                if (traceEnabled()) {
+                    fprintf(stderr,
+                            "trace %.3f worker %d reached its first derivation "
+                            "%.3fs after being forked (the attribute itself "
+                            "took %.3fs)\n",
+                            traceSecondsSince(trace.start), (int)worker.pid,
+                            traceSeconds(now - worker.forkedAt),
+                            traceSeconds(now - worker.jobStartedAt));
+                }
                 worker.producedADerivation = true;
             }
         }
@@ -439,6 +559,7 @@ int runCoordinator(const Args & args) {
             if (wantEdges) {
                 emitEdges(edgeDiscovery.addOutput(attrPath, drvPath));
             }
+            primeFor(attrPath);
             return;
         }
     };
@@ -482,7 +603,7 @@ int runCoordinator(const Args & args) {
             kill(worker.pid, SIGKILL);
         }
         worker.shutdown();
-        worker = forkWorker(args, liveFdsExcept(&worker));
+        worker = forkWorker(args, shared, liveFdsExcept(&worker));
         worker.startupFailures = failures;
     };
 
@@ -664,6 +785,20 @@ int runCoordinator(const Args & args) {
     // spent waiting on workers.
     while (wantEdges && !edgeDiscovery.done()) {
         stepEdges(1024);
+    }
+
+    if (traceEnabled()) {
+        fprintf(stderr,
+                "trace summary wall=%.3fs workers=%zu startupTotal=%.3fs "
+                "warmAttrs=%zu warmAttrTotal=%.3fs meanWarmAttr=%.4fs "
+                "jobs=%zu\n",
+                traceSecondsSince(trace.start), trace.forks,
+                traceSeconds(trace.firstResultTotal), trace.warmAttrs,
+                traceSeconds(trace.warmAttrTotal),
+                trace.warmAttrs
+                    ? traceSeconds(trace.warmAttrTotal) / trace.warmAttrs
+                    : 0.0,
+                trace.jobs);
     }
 
     // Say that the stream is complete, as its last act.

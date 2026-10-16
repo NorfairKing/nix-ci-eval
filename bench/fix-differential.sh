@@ -4,8 +4,8 @@
 #
 #   bench/fix-differential.sh <fix-binary> <flake-ref>...
 #
-# A drvPath hashes the complete derivation that produced it — inputs,
-# environment and builder, transitively — so two evaluators agreeing on every
+# A drvPath hashes the complete derivation that produced it, inputs,
+# environment and builder, transitively, so two evaluators agreeing on every
 # drvPath have agreed on everything that fed into every output. That is the
 # only question worth asking of a replacement evaluator: nix-ci-eval exists to
 # tell a consumer what to build, and an evaluator that names a derivation
@@ -15,7 +15,7 @@
 # could be built on. Without it fix leaves the fetched flake source in its own
 # cache instead of the store, `self.outPath` is not a store path, and every
 # derivation reached through `src = ./.` gets a drvPath that nothing else will
-# ever produce — reported as success. docs/fix-evaluator.md has the details.
+# ever produce, reported as success. docs/fix-evaluator.md has the details.
 #
 # Which reference you pass matters, and a disagreement may be telling you
 # about the reference rather than about the attribute. A `github:` or `git+`

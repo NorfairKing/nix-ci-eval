@@ -8,14 +8,14 @@ one. This records what happened when it was measured against the evaluator
 this tool links today, what swapping them would take, and why that swap is not
 worth making yet.
 
-The short version. On bulk evaluation fix is 2.5x to 5.9x faster and exactly
-as correct, byte for byte, over roughly 110,000 attributes. On the workload
-this tool actually has — a handful of outputs over an enormous package set —
-it is *slower*, because the run is dominated by reaching the first derivation
-rather than by the attributes. Separately, it computes wrong derivations for
-some flake references without saying so, it ships no library to link against,
-and it has no local store, so none of this repository's checks can run under
-it.
+The short version. On bulk evaluation fix is 1.4x to 5.9x faster, depending on
+the tree and on how many cores it gets, and exactly as correct: byte-identical
+derivation paths over roughly 110,000 attributes. On the workload this tool
+actually has, a handful of outputs over an enormous package set, it is
+*slower*, because the run is dominated by reaching the first derivation rather
+than by the attributes. Separately, it computes wrong derivations for some
+flake references without saying so, it ships no library to link against, and
+it has no local store, so none of this repository's checks can run under it.
 
 ## How the comparison was made
 
@@ -26,7 +26,7 @@ result to `{ "<attr.path>" = "<drvPath>" | null; }`, so two evaluators can be
 compared by a byte comparison of their JSON.
 
 That comparison is the whole point. A drvPath hashes the complete derivation
-that produced it — inputs, environment and builder, transitively — so two
+that produced it, inputs and environment and builder, transitively, so two
 evaluators agreeing on every drvPath have agreed on everything that fed into
 every output. This tool exists to tell a consumer what to build, and an
 evaluator that names a derivation `nix build` would never produce is worse
@@ -42,49 +42,54 @@ $ bench/fix-differential.sh path/to/fix github:NorfairKing/autodocodec
 fix's own test suite does the same thing over the whole of nixpkgs
 (`test/nixpkgs/outpaths.nix`, about 80,000 derivations) and compares every
 drvPath against a reference Nix, which is why the correctness claim below is
-believable at all — and the shape of that test universe is also why it missed
-what is described under "Flake sources" below.
+believable at all. The shape of that test universe is also why it missed what
+is described under "Flake sources" below.
 
 fix 0.3.0 builds unmodified against this repository's pinned nixpkgs 26.05,
 which carries the `zig_0_16` it needs.
 
 ## Speed
 
-Measured on one machine against the pinned nixpkgs, interleaved, once. Enough
-to see an order of magnitude and not enough to publish.
+Measured interleaved on one 64-core machine against the pinned nixpkgs, with
+other work running on it. fix is parallel and Nix is not, so fix is much the
+more sensitive of the two to what else the machine is doing: its bulk numbers
+moved by half again between repeats where Nix's barely moved at all. The
+ranges below are the spread actually observed, not error bars.
 
 In bulk, through a plain path argument rather than a flake:
 
 | Workload | Attributes | `nix-instantiate` | `fix` | drvPaths |
 |---|---|---|---|---|
-| `python3Packages` | 10858 (368 threw) | 7.7s, 1.0 GiB | 1.3s, — | byte-identical |
-| nixpkgs top level, two levels deep | ~99000 | 69.2s, 12.6 GiB | 27.7s, 39.1 GiB | byte-identical |
+| `python3Packages` | 10858 (368 threw) | 6.9-7.7s, 1.3 GiB | 1.3-1.9s, 4.1 GiB | byte-identical |
+| nixpkgs top level, two levels deep | 99861 (16121 threw) | 69.0-69.2s, 12.6 GiB | 27.7-48.1s, 39.2 GiB | byte-identical |
 
-On flakes, which is what this tool is given:
+On flakes, which is what this tool is actually given. Three repeats each, and
+these barely moved:
 
-| Flake | Attributes | `nix-instantiate` | `fix` |
-|---|---|---|---|
-| `git+file:` this repository, pinned rev | 7 | 0.77s | 0.83s |
-| `git+file:` autodocodec | 17 | 3.93s | 5.65s |
+| Flake | Attributes | `nix-instantiate` | `fix` | ratio |
+|---|---|---|---|---|
+| `git+file:` this repository, pinned rev | 7 | 0.72-0.74s | 0.82-0.89s | 0.81-0.91x |
+| `git+file:` autodocodec | 17 | 3.92-3.98s | 4.18-4.50s | 0.88-0.94x |
 
-The second table is the one that decides this. Almost every flake this tool
-sees has a few dozen outputs hanging off nixpkgs, so the cost is reaching the
-first derivation, not evaluating the attributes once the package set is warm.
-A faster evaluator does not help with that, and fix's startup — including
-refetching the flake's inputs, below — makes it a little worse. The
+The second table is the one that decides this, and it points the other way
+from the first. Almost every flake this tool sees has a few dozen outputs
+hanging off an enormous package set, so the cost is reaching the first
+derivation, not evaluating the attributes once the package set is warm. A
+faster evaluator does not help with that, and fix's startup, including
+refetching the flake's inputs, makes it consistently a little worse. The
 fork-and-share-the-warm-evaluator design exists precisely for this shape, and
 nothing in fix replaces it.
 
-The memory column in the first table is worth noting too. fix trades a great
-deal of memory for its parallelism: 39 GiB against 12.6 GiB on the same tree,
-and its own documentation warns the full nixpkgs universe peaks around 51 GiB
-at default settings. This tool bounds a worker at 4 GiB and restarts it when
-it goes over, a mechanism that does not survive the move to one process with
-one shared heap; `--gc-budget` would be the replacement knob.
+The memory column is worth noting too. fix trades a great deal of memory for
+its parallelism: 39 GiB against 12.6 GiB on the same tree, and its own
+documentation warns the full nixpkgs universe peaks around 51 GiB at default
+settings. This tool bounds a worker at 4 GiB and restarts it when it goes
+over, a mechanism that does not survive the move to one process with one
+shared heap. `--gc-budget` would be the replacement knob.
 
 ## Correctness
 
-Where the two evaluators are asked the same question in the same way, they
+Where the two evaluators are asked the same question in the same way they
 agree completely: byte-identical drvPaths over ~110,000 nixpkgs attributes,
 and over every output of the flakes tried here. The disagreements are all
 about how a flake's *source* reaches the store, and they are silent.
@@ -95,12 +100,12 @@ By default fix keeps fetched flake sources in `~/.cache/fix/...` rather than
 the Nix store, so `builtins.getFlake ... .outPath` is a cache directory and
 not a store path.
 
-When a flake does `src = ./.` — which is most of them — Nix sees a path
-already in the store and re-imports it, producing the doubled
-`<hash>-<hash>-source` name that flake packaging is known for. fix sees a path
-that is not in the store, imports it once, and gets a different source path.
-Every derivation built from that source then has a different drvPath, and fix
-reports it as success. Six of this flake's seven outputs disagreed this way.
+When a flake does `src = ./.`, which is most of them, Nix sees a path already
+in the store and re-imports it, producing the doubled `<hash>-<hash>-source`
+name that flake packaging is known for. fix sees a path that is not in the
+store, imports it once, and gets a different source path. Every derivation
+built from that source then has a different drvPath, and fix reports it as
+success. Six of this flake's seven outputs disagreed this way.
 
 `--read-write-mode` registers the source in the store and this disagreement
 goes away. Any replacement would always pass it.
@@ -148,9 +153,9 @@ directory, with its own SQLite database, and evaluation writes its `.drv`
 files there. No daemon, no network, nothing touching the real store.
 
 fix can do neither half of that. It cannot open a local store at all. A `nix
-daemon` serving a throwaway store *is* reachable —
-`NIX_DAEMON_SOCKET_PATH=<socket> fix eval --store daemon --read-write-mode`
-stores a `.drv` through one — but fix computes every store path against a
+daemon` serving a throwaway store *is* reachable
+(`NIX_DAEMON_SOCKET_PATH=<socket> fix eval --store daemon --read-write-mode`
+stores a `.drv` through one) but fix computes every store path against a
 hardcoded `/nix/store`, while `nix daemon --store "local?root=$T"` serves a
 store whose directory is `$T/nix/store`. fix returns `/nix/store/...` paths
 for a store that keeps them elsewhere, and says nothing. Making a daemon serve
@@ -187,19 +192,19 @@ There is no streaming output: `fix eval --json` writes one blob at the end,
 where this tool's contract is a line per output as it is discovered.
 
 No substitutability query is exposed, so `isCached` has no answer, and nothing
-surfaces a derivation's `input_drvs`, so dependency edges have no source —
+surfaces a derivation's `input_drvs`, so dependency edges have no source,
 though libnixstore can keep doing both.
 
 ## What a replacement would look like
 
 The requirement is that nothing in the output changes: streaming NDJSON,
 `isCached` per job, dependency edges, the `done` sentinel. Only resource usage
-may move. Linking fix rather than shelling out to it is the right call —
+may move. Linking fix rather than shelling out to it is the right call;
 shelling out gives up streaming and per-attribute error reporting in the same
 breath.
 
-Linking is plausible. fix has a real embedder API — `Engine.init` with a
-worker count, `Engine.evaluate`, `stringValue`, attribute navigation — and
+Linking is plausible. fix has a real embedder API, `Engine.init` with a worker
+count, `Engine.evaluate`, `stringValue` and attribute navigation, and
 `src/integration/expr_api/*.zig` exercises it from an embedder's point of
 view. What is missing is a C ABI over it and a static library target in
 `build.zig`; today the only `export fn`s in the repository are a SHA256

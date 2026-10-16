@@ -29,7 +29,7 @@
 set -uo pipefail
 
 if [ "$#" -lt 2 ]; then
-  sed -n '2,4p' "$0" >&2
+  sed -n '2,5p' "$0" >&2
   exit 2
 fi
 
@@ -111,8 +111,12 @@ for flake in "$@"; do
   if diff -q "$work/nix.json" "$work/fix.json" > /dev/null; then
     echo "  agrees on every drvPath"
   else
+    # Over the keys of both, not just the oracle's: an evaluator that
+    # discovered a different set of attributes disagrees just as much as one
+    # that reached a different derivation, and reporting nothing in that case
+    # would be the most misleading answer available.
     jq -n --slurpfile a "$work/nix.json" --slurpfile b "$work/fix.json" -r '
-      [$a[0] | keys[] | select($a[0][.] != $b[0][.])] as $bad
+      [($a[0] + $b[0] | keys[]) | select($a[0][.] != $b[0][.])] as $bad
       | "  DISAGREES on \($bad | length) of \($a[0] | length)",
         ($bad[:10][] | "      " + .
           + "\n        nix " + ($a[0][.] | tostring)

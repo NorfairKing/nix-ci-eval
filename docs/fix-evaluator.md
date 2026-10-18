@@ -244,3 +244,7 @@ universe is rooted somewhere flake source handling never reaches.
 Revisit when fix has a local store, at which point the checks can run under it
 and the differential can live in CI rather than in a script someone remembers
 to run. The harness is committed, so re-measuring is one command.
+
+[docs/iets-evaluator.md](iets-evaluator.md) asks the same question of iets,
+which answers it differently: faster on this tool's own workload rather than
+only in bulk, and right about flake sources.

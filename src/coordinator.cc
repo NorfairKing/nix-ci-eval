@@ -48,6 +48,11 @@ constexpr int kMaxStartupFailures = 3;
 // Real outputs sit three levels down (packages.<system>.<name>) and a flake
 // that groups them nests a few more, so this is far past anything meaningful
 // while still bounding a set that contains itself.
+//
+// [tag:maxAttrPathDepth] The differential harness performs this same walk in
+// the Nix language so another evaluator can be asked to do it. Both have to
+// bound it the same way, or the two sides are compared over different
+// universes and the difference reads as an evaluator disagreement.
 constexpr std::size_t kMaxAttrPathDepth = 12;
 
 // How many reference queries one pass of the loop answers. Small enough that

@@ -19,6 +19,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <thread>
+#include <variant>
 #include <unistd.h>
 #include <vector>
 
@@ -28,6 +29,8 @@
 #include <nix/store/store-open.hh>
 #include <nix/util/signals.hh>
 
+#include "iets.hh"
+#include "iets_run.hh"
 #include "line_io.hh"
 #include "nix_eval.hh"
 #include "pure.hh"
@@ -43,17 +46,6 @@ using nlohmann::json;
 // the whole run, to bound a startup crash loop (e.g. the flake makes evaluation
 // segfault or get OOM-killed).
 constexpr int kMaxStartupFailures = 3;
-
-// How deep an attribute path may get before the walk refuses to go further.
-// Real outputs sit three levels down (packages.<system>.<name>) and a flake
-// that groups them nests a few more, so this is far past anything meaningful
-// while still bounding a set that contains itself.
-//
-// [tag:maxAttrPathDepth] The differential harness performs this same walk in
-// the Nix language so another evaluator can be asked to do it. Both have to
-// bound it the same way, or the two sides are compared over different
-// universes and the difference reads as an evaluator disagreement.
-constexpr std::size_t kMaxAttrPathDepth = 12;
 
 // How many reference queries one pass of the loop answers. Small enough that
 // servicing a worker is never held up for long, large enough that the walk
@@ -270,10 +262,40 @@ int runCoordinator(const Args & args) {
     // references valid.
     std::deque<Worker> workers;
 
+    // With import-from-derivation off, iets reports what it can and the Nix
+    // workers only see what it could not. Started before any worker is
+    // forked, so the checkout's cost is not paid while workers sit idle.
+    std::unique_ptr<IetsRun> iets;
+    bool evaluatedWithIets = false;
+    if (!args.importFromDerivation) {
+        auto started = IetsRun::start(args);
+        if (auto * run = std::get_if<std::unique_ptr<IetsRun>>(&started)) {
+            iets = std::move(*run);
+            evaluatedWithIets = true;
+        } else {
+            fprintf(stderr, "nix-ci-eval: evaluating with Nix, not iets: %s\n",
+                    std::get<NotForIets>(started).reason.c_str());
+        }
+    }
+    std::size_t ietsJobs = 0;
+    std::size_t handedToNix = 0;
+
+    // Every attribute already reported, when iets is involved. Nix can be
+    // asked about an attribute iets already answered (after iets fails
+    // partway, the whole walk is handed to Nix), and a consumer must see each
+    // attribute once.
+    std::set<AttrPath> reported;
+    auto firstReport = [&](const AttrPath & attrPath) {
+        return !evaluatedWithIets || reported.insert(attrPath).second;
+    };
+
     // The parent-side pipe descriptors of every live worker, so a newly forked
     // child can close the ones that are not its own.
     auto liveFdsExcept = [&](const Worker * skip) {
         std::vector<int> fds;
+        if (iets) {
+            fds.push_back(iets->output().fd());
+        }
         for (const auto & worker : workers) {
             if (&worker == skip) {
                 continue;
@@ -289,7 +311,9 @@ int runCoordinator(const Args & args) {
     };
 
     std::deque<PendingAttr> todo;
-    todo.push_back(PendingAttr{}); // the discovery root
+    if (!iets) {
+        todo.push_back(PendingAttr{}); // the discovery root
+    }
     std::size_t active = 0;
 
     WorkerCostModel costModel;
@@ -312,6 +336,12 @@ int runCoordinator(const Args & args) {
     };
 
     auto growPool = [&]() {
+        // shouldSpawnWorker forks a first worker unconditionally, because
+        // without iets the root is waiting for it. With iets there may never
+        // be anything for Nix to do.
+        if (todo.empty()) {
+            return;
+        }
         if (!shouldSpawnWorker(poolSizing())) {
             return;
         }
@@ -414,7 +444,9 @@ int runCoordinator(const Args & args) {
                     std::to_string(kMaxAttrPathDepth) +
                     " levels deep; refusing to recurse further, which usually "
                     "means an attribute set contains itself";
-                emit("error", std::move(tooDeep));
+                if (firstReport(base)) {
+                    emit("error", std::move(tooDeep));
+                }
                 return;
             }
             for (const auto & child :
@@ -429,13 +461,18 @@ int runCoordinator(const Args & args) {
             return;
         }
         if (kind == "error") {
-            emit("error", std::move(message));
+            if (firstReport(message.at("attrPath").get<AttrPath>())) {
+                emit("error", std::move(message));
+            }
             return;
         }
         if (kind == "job") {
             auto attrPath =
                 message.at("attrPath").get<std::vector<std::string>>();
             auto drvPath = message.at("drvPath").get<std::string>();
+            if (!firstReport(attrPath)) {
+                return;
+            }
             // The job goes out before the edges its arrival makes known,
             // because those edges name it: a consumer told to order a build
             // against an attribute it has not been told about yet has nothing
@@ -446,6 +483,46 @@ int runCoordinator(const Args & args) {
             }
             return;
         }
+    };
+
+    // iets only ever contributes jobs. Anything it could not evaluate goes to
+    // the Nix workers, so that every error a consumer sees is the one Nix
+    // writes, and anything iets cannot do makes the run slower rather than
+    // different.
+    auto handleIetsLine = [&](const std::string & raw) {
+        auto line = parseIetsLine(raw);
+        if (auto * job = std::get_if<IetsJob>(&line)) {
+            if (!firstReport(job->attrPath)) {
+                return;
+            }
+            ietsJobs++;
+            json message;
+            message["attrPath"] = job->attrPath;
+            message["drvPath"] = job->drvPath;
+            message["isCached"] = job->isCached;
+            emit("job", std::move(message));
+            if (wantEdges) {
+                emitEdges(edgeDiscovery.addOutput(job->attrPath, job->drvPath));
+            }
+        } else if (auto * failed = std::get_if<IetsFailed>(&line)) {
+            handedToNix++;
+            todo.push_back(PendingAttr{std::move(failed->attrPath), 0});
+        }
+    };
+
+    // iets has stopped producing output. If it did not finish cleanly, it may
+    // have left attributes unreported, so Nix walks the whole flake and
+    // reports only what iets did not.
+    auto endIets = [&](bool trusted) {
+        bool succeeded = trusted ? iets->finish() : (iets->abandon(), false);
+        if (!succeeded) {
+            fprintf(stderr,
+                    "nix-ci-eval: iets did not finish, evaluating the rest "
+                    "with Nix. Its output ended with:\n%s\n",
+                    iets->logTail().c_str());
+            todo.push_back(PendingAttr{});
+        }
+        iets.reset();
     };
 
     // Handle a worker that died or produced unusable output: report its
@@ -466,7 +543,9 @@ int runCoordinator(const Args & args) {
                 err["attrPath"] = worker.currentJob->path;
                 err["error"] = "evaluation worker " + reason +
                                " while evaluating this attribute, twice";
-                emit("error", std::move(err));
+                if (firstReport(worker.currentJob->path)) {
+                    emit("error", std::move(err));
+                }
             }
             worker.currentJob.reset();
             if (active > 0) {
@@ -576,7 +655,7 @@ int runCoordinator(const Args & args) {
         growPool();
         dispatch();
         stepEdges(kEdgeQueriesPerPass);
-        if (todo.empty() && active == 0) {
+        if (todo.empty() && active == 0 && !iets) {
             break;
         }
 
@@ -587,6 +666,10 @@ int runCoordinator(const Args & args) {
                 pollfds.push_back({worker.fromChild->fd(), POLLIN, 0});
                 pollWorkers.push_back(&worker);
             }
+        }
+        // Last, so that the worker entries keep their indices.
+        if (iets) {
+            pollfds.push_back({iets->output().fd(), POLLIN, 0});
         }
 
         int ready = poll(pollfds.data(), pollfds.size(), pollTimeoutMs());
@@ -602,7 +685,7 @@ int runCoordinator(const Args & args) {
             continue;
         }
 
-        for (std::size_t i = 0; i < pollfds.size(); i++) {
+        for (std::size_t i = 0; i < pollWorkers.size(); i++) {
             if ((pollfds[i].revents &
                  (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0) {
                 continue;
@@ -634,10 +717,39 @@ int runCoordinator(const Args & args) {
             } while (worker->fromChild && worker->fromChild->hasBufferedLine());
         }
 
+        if (iets && !fatal &&
+            (pollfds.back().revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) !=
+                0) {
+            do {
+                std::string line;
+                try {
+                    line = iets->output().readLine();
+                } catch (const LineTooLong &) {
+                    endIets(false);
+                    break;
+                }
+                if (line.empty()) {
+                    endIets(true);
+                    break;
+                }
+                try {
+                    handleIetsLine(line);
+                } catch (const std::exception &) {
+                    // A line this tool cannot read means iets's output can
+                    // no longer be followed, so Nix takes over.
+                    endIets(false);
+                    break;
+                }
+            } while (iets->output().hasBufferedLine());
+        }
+
         if (fatal) {
             break;
         }
     }
+
+    // Kills iets if the run is ending early.
+    iets.reset();
 
     for (auto & worker : workers) {
         if (worker.toChildFd >= 0) {
@@ -678,6 +790,15 @@ int runCoordinator(const Args & args) {
     // finished run from one whose output was cut off partway: both simply
     // stop. Reaching this line is the only proof that everything the run was
     // going to report has been reported.
+    // Anything handed to Nix on a flake whose attributes all evaluate points
+    // at iets disagreeing with Nix, which is worth knowing about.
+    if (evaluatedWithIets) {
+        fprintf(stderr,
+                "nix-ci-eval: iets reported %zu jobs and handed %zu attributes "
+                "to Nix\n",
+                ietsJobs, handedToNix);
+    }
+
     emit("done", json::object());
 
     return 0;

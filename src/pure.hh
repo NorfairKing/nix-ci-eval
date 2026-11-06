@@ -116,6 +116,20 @@ bool shouldSpawnWorker(const PoolSizing & sizing);
 // level, so it never has to be parsed back out of a rendered string.
 using AttrPath = std::vector<std::string>;
 
+// How deep an attribute path may get before the walk refuses to go further.
+// Real outputs sit three levels down (packages.<system>.<name>) and a flake
+// that groups them nests a few more, so this is far past anything meaningful
+// while still bounding a set that contains itself.
+//
+// [tag:maxAttrPathDepth] The walk is also written in the Nix language, for
+// iets (ietsSelectExpr) and for the differential harness. Every copy has to
+// bound it the same way: for iets so that it reports the same attributes, and
+// for the harness so that two evaluators are compared over the same universe.
+constexpr std::size_t kMaxAttrPathDepth = 12;
+
+// Render a string as a Nix double-quoted string literal.
+std::string nixStringLiteral(const std::string & value);
+
 // The dependencies of one discovered output: the other discovered outputs
 // reached from its derivation, sorted, de-duplicated and excluding itself.
 // Empty when it depends on none of them.

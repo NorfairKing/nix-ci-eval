@@ -1,6 +1,8 @@
 #include "nix_eval.hh"
 
 #include <filesystem>
+#include <optional>
+#include <variant>
 #include <stdexcept>
 
 #include <nix/cmd/common-eval-args.hh>
@@ -21,37 +23,17 @@
 #include <nix/store/globals.hh>
 #include <nix/store/store-api.hh>
 #include <nix/store/store-open.hh>
+#include <nix/store/uds-remote-store.hh>
 #include <nix/util/configuration.hh>
 #include <nix/util/current-process.hh>
 #include <nix/util/terminal.hh>
+#include <nix/util/util.hh>
 
 #include "pure.hh"
 
 namespace nixcieval {
 
 namespace {
-
-// Render a string as a Nix double-quoted string literal.
-std::string nixStringLiteral(const std::string & value) {
-    std::string out = "\"";
-    for (char c : value) {
-        switch (c) {
-        case '\\':
-            out += "\\\\";
-            break;
-        case '"':
-            out += "\\\"";
-            break;
-        case '$':
-            out += "\\$";
-            break;
-        default:
-            out += c;
-        }
-    }
-    out += "\"";
-    return out;
-}
 
 // The discovery root: gather every supported output type for the target system
 // into one attribute set. Output types the flake does not define become {} (via
@@ -113,6 +95,36 @@ nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow) {
     return nix::FlakeRef(
         nix::fetchers::Input::fromAttrs(nix::fetchSettings, std::move(attrs)),
         flakeRef.subdir);
+}
+
+RootRef describeFlakeRef(const std::string & flakeRef) {
+    auto parsed = nix::parseFlakeRef(nix::fetchSettings, flakeRef,
+                                     std::filesystem::current_path());
+    RootRef root;
+    root.type = parsed.input.getType();
+    root.subdir = parsed.subdir;
+    for (const auto & [key, value] : parsed.input.attrs) {
+        root.attrs[key] = std::visit(
+            nix::overloaded{
+                [](const std::string & s) { return s; },
+                [](uint64_t n) { return std::to_string(n); },
+                [](const nix::Explicit<bool> & b) {
+                    return std::string(b.t ? "1" : "0");
+                },
+            },
+            value);
+    }
+    return root;
+}
+
+std::optional<std::string> daemonSocketPath() {
+    auto store = nix::openStore();
+    auto daemon =
+        std::dynamic_pointer_cast<nix::UDSRemoteStore>(store.get_ptr());
+    if (!daemon) {
+        return std::nullopt;
+    }
+    return daemon->config->path.string();
 }
 
 struct Evaluator::Impl {

@@ -5,9 +5,11 @@
 #include <map>
 #include <set>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "args.hh"
+#include "iets.hh"
 #include "pure.hh"
 
 namespace {
@@ -612,6 +614,167 @@ int main() {
         expectBool("--system is required", rejects({"--flake", "."}), true);
         expectBool("an unknown flag is rejected",
                    rejects(withFlags({"--log-format", "internal-json"})), true);
+    }
+
+    {
+        using nixcieval::GitRoot;
+        using nixcieval::gitRootFor;
+        using nixcieval::NotForIets;
+        using nixcieval::RootRef;
+
+        auto describe = [](const std::variant<GitRoot, NotForIets> & v) {
+            if (auto * why = std::get_if<NotForIets>(&v)) {
+                return "nix: " + why->reason;
+            }
+            const auto & git = std::get<GitRoot>(v);
+            return "git url=" + git.url + " rev=" + git.rev.value_or("-") +
+                   " ref=" + git.ref.value_or("-") + " dir=" + git.subdir;
+        };
+
+        expectEq("a pinned remote git root is checked out",
+                 describe(gitRootFor(RootRef{
+                     .type = "git",
+                     .attrs = {{"type", "git"},
+                               {"url", "https://example.com/r"},
+                               {"ref", "main"},
+                               {"rev", "abc"},
+                               {"shallow", "1"}},
+                     .subdir = "sub",
+                 })),
+                 "git url=https://example.com/r rev=abc ref=main dir=sub");
+        expectEq("an unpinned git root is checked out at whatever it names",
+                 describe(gitRootFor(RootRef{
+                     .type = "git",
+                     .attrs = {{"type", "git"}, {"url", "file:///r"}},
+                     .subdir = "",
+                 })),
+                 "git url=file:///r rev=- ref=- dir=");
+        expectEq("a github root goes to Nix",
+                 describe(gitRootFor(RootRef{
+                     .type = "github",
+                     .attrs = {{"type", "github"}, {"owner", "o"}},
+                     .subdir = "",
+                 })),
+                 "nix: the flake is a 'github' input, and only a git "
+                 "repository can be checked out for iets");
+        expectEq("a git root with submodules goes to Nix",
+                 describe(gitRootFor(RootRef{
+                     .type = "git",
+                     .attrs = {{"type", "git"},
+                               {"url", "file:///r"},
+                               {"submodules", "1"}},
+                     .subdir = "",
+                 })),
+                 "nix: the flake reference sets 'submodules', which a "
+                 "checkout for iets would not honour");
+
+        GitRoot remote{.url = "https://example.com/r",
+                       .rev = "abc",
+                       .ref = "main",
+                       .subdir = ""};
+        GitRoot local{.url = "file:///r",
+                      .rev = std::nullopt,
+                      .ref = std::nullopt,
+                      .subdir = ""};
+        GitRoot byRef{.url = "https://example.com/r",
+                      .rev = std::nullopt,
+                      .ref = "main",
+                      .subdir = ""};
+        expectBool("a remote root is fetched shallow",
+                   nixcieval::fetchShallow(remote, true), true);
+        expectBool("unless the history was asked for",
+                   nixcieval::fetchShallow(remote, false), false);
+        expectBool("a local root is never fetched shallow",
+                   nixcieval::fetchShallow(local, true), false);
+
+        auto joined = [](const std::vector<std::string> & words) {
+            std::string out;
+            for (const auto & word : words) {
+                out += (out.empty() ? "" : " ") + word;
+            }
+            return out;
+        };
+        expectEq("a rev is fetched by itself",
+                 joined(nixcieval::gitFetchArgs(remote, true)),
+                 "fetch --quiet --no-tags --depth 1 -- "
+                 "https://example.com/r abc");
+        expectEq("without a rev the ref is fetched",
+                 joined(nixcieval::gitFetchArgs(byRef, false)),
+                 "fetch --quiet --no-tags -- https://example.com/r main");
+        expectEq("without either HEAD is fetched",
+                 joined(nixcieval::gitFetchArgs(local, false)),
+                 "fetch --quiet --no-tags -- file:///r HEAD");
+
+        expectEq("iets gets the checkout pinned to the rev",
+                 nixcieval::ietsFlakeRef("/tmp/x y/checkout", "abc", ""),
+                 "git+file:///tmp/x%20y/checkout?rev=abc");
+        expectEq("and the flake's directory within it",
+                 nixcieval::ietsFlakeRef("/tmp/c", "abc", "sub/dir"),
+                 "git+file:///tmp/c?rev=abc&dir=sub/dir");
+
+        nixcieval::IetsInvocation invocation{
+            .flakeRef = "git+file:///c?rev=abc",
+            .system = "x86_64-linux",
+            .storeSocket = "/s",
+            .workers = std::nullopt,
+            .maxMemoryMiB = 100,
+            .impure = false,
+        };
+        auto select = nixcieval::ietsSelectExpr("x86_64-linux");
+        expectEq("iets is asked for jobs with their cache status",
+                 joined(nixcieval::ietsArgs(invocation)),
+                 "eval-jobs --flake git+file:///c?rev=abc --select " + select +
+                     " --check-cache-status --eval-store unix:///s "
+                     "--max-memory-size 100 --quiet");
+        invocation.workers = 3;
+        invocation.impure = true;
+        expectEq("a worker ceiling and impurity are passed on",
+                 joined(nixcieval::ietsArgs(invocation)),
+                 "eval-jobs --flake git+file:///c?rev=abc --select " + select +
+                     " --check-cache-status --eval-store unix:///s "
+                     "--max-memory-size 100 --quiet --workers 3 --impure");
+
+        auto read = [](const std::string & line) -> std::string {
+            auto parsed = nixcieval::parseIetsLine(line);
+            if (auto * job = std::get_if<nixcieval::IetsJob>(&parsed)) {
+                return "job " + renderPath(job->attrPath) + " " +
+                       job->drvPath + (job->isCached ? " cached" : "");
+            }
+            if (auto * failed = std::get_if<nixcieval::IetsFailed>(&parsed)) {
+                return "failed " + renderPath(failed->attrPath);
+            }
+            return "ignored";
+        };
+        expectEq("a job line is a job",
+                 read(R"({"attrPath":["a","b"],"drvPath":"/s/x.drv",)"
+                      R"("isCached":true,"name":"x"})"),
+                 "job a.b /s/x.drv cached");
+        expectEq("an error line is a failure, whatever else it carries",
+                 read(R"({"attrPath":["a"],"drvPath":null,"error":"e"})"),
+                 "failed a");
+        expectEq("a line without an attribute path is ignored",
+                 read(R"({"jobs":3})"), "ignored");
+        expectBool("a line that is not JSON is refused",
+                   [&] {
+                       try {
+                           nixcieval::parseIetsLine("not json");
+                           return false;
+                       } catch (const std::exception &) {
+                           return true;
+                       }
+                   }(),
+                   true);
+        expectBool("a job without its cache status is refused",
+                   [&] {
+                       try {
+                           nixcieval::parseIetsLine(
+                               R"({"attrPath":["a"],"drvPath":"/s/x.drv"})");
+                           return false;
+                       } catch (const std::exception &) {
+                           return true;
+                       }
+                   }(),
+                   true);
     }
 
     if (failures > 0) {

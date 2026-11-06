@@ -6,6 +6,10 @@
 , pkg-config
 , nix
 , nlohmann_json
+, gitMinimal
+  # Evaluates flakes that turn import-from-derivation off. Null builds a tool
+  # that evaluates everything with Nix, which is what iets is compared against.
+, iets ? null
 }:
 stdenv.mkDerivation {
   pname = "nix-ci-eval";
@@ -16,6 +20,10 @@ stdenv.mkDerivation {
   # nixpkgs' meson hook defaults to --buildtype=plain, which adds no
   # optimisation flags at all. Build the shipped binary optimised.
   mesonBuildType = "release";
+
+  mesonFlags = [
+    (lib.mesonOption "git" (lib.getExe gitMinimal))
+  ] ++ lib.optional (iets != null) (lib.mesonOption "iets" (lib.getExe' iets "iets"));
 
   nativeBuildInputs = [ meson ninja pkg-config ];
   buildInputs = [ nix nlohmann_json ];

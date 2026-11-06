@@ -1,0 +1,6 @@
+# The iets binary to evaluate with when import-from-derivation is off. Empty
+# means this build has none, and every run is evaluated with Nix.
+option('iets', type : 'string', value : '')
+# The git binary that checks out the root flake for iets. A bare name is
+# looked up on PATH.
+option('git', type : 'string', value : 'git')

@@ -2,6 +2,7 @@ project(
   'nix-ci-eval',
   'cpp',
   version : '0.0.0',
+  meson_version : '>=1.1',
   # Optimised by default because -Werror is on and glibc's _FORTIFY_SOURCE
   # warns when it is compiled without optimisation, which would make a plain
   # `meson setup builddir` fail. c++23 is what the nix pkg-config files force
@@ -36,14 +37,19 @@ nix_deps = [
 # their own.
 core_lib = static_library(
   'nix-ci-eval-core',
-  ['src/pure.cc', 'src/args.cc', 'src/line_io.cc'],
+  ['src/pure.cc', 'src/args.cc', 'src/line_io.cc', 'src/iets.cc', 'src/process.cc'],
+  dependencies : dependency('nlohmann_json'),
 )
 
 # Everything that links the Nix evaluator.
 nix_lib = static_library(
   'nix-ci-eval-nix',
-  ['src/nix_eval.cc', 'src/worker.cc', 'src/coordinator.cc'],
+  ['src/nix_eval.cc', 'src/worker.cc', 'src/coordinator.cc', 'src/iets_run.cc'],
   dependencies : nix_deps,
+  cpp_args : [
+    '-DNIX_CI_EVAL_IETS=' + '"' + get_option('iets') + '"',
+    '-DNIX_CI_EVAL_GIT=' + '"' + get_option('git') + '"',
+  ],
 )
 
 executable(
@@ -58,6 +64,7 @@ pure_test = executable(
   'pure-test',
   'test/pure_test.cc',
   link_with : core_lib,
+  dependencies : dependency('nlohmann_json'),
   include_directories : include_directories('src'),
 )
 test('pure', pure_test)

@@ -3,9 +3,12 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Not following nixpkgs: iets needs a newer Rust than a stable nixpkgs
+    # may carry, and it is tested against its own.
+    iets.url = "github:numtide/iets";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, iets }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forEachSystem = nixpkgs.lib.genAttrs systems;
@@ -19,13 +22,19 @@
       # Built with the consumer's package set, so the tool links the same nix
       # as whatever else that package set builds.
       overlays.default = final: _prev: {
-        nix-ci-eval = final.callPackage ./package.nix { };
+        nix-ci-eval = final.callPackage ./package.nix {
+          iets = iets.packages.${final.stdenv.hostPlatform.system}.default;
+        };
       };
 
       packages = forEachSystem (sys:
         let pkgs = pkgsFor sys; in
         {
-          nix-ci-eval = pkgs.callPackage ./package.nix { };
+          nix-ci-eval = pkgs.callPackage ./package.nix {
+            iets = iets.packages.${sys}.default;
+          };
+          # Evaluates everything with Nix, for comparing iets against.
+          nix-ci-eval-without-iets = pkgs.callPackage ./package.nix { };
           default = self.packages.${sys}.nix-ci-eval;
         });
 
@@ -64,6 +73,25 @@
               ''
                 export HOME=$TMPDIR
                 bash ${./test/shallow}/run.sh
+                touch $out
+              '';
+
+          # Evaluates fixture flakes with import-from-derivation off, which
+          # goes through iets, and asserts the output is exactly what a build
+          # without iets reports. Starts its own nix-daemon on a throwaway
+          # store, because iets writes derivations through one, and serves
+          # the flakes over a loopback git daemon, so it needs no network.
+          nix-ci-eval-iets-test =
+            pkgs.runCommand "nix-ci-eval-iets-test"
+              {
+                nativeBuildInputs = [ pkgs.git pkgs.jq pkgs.nix ];
+                NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+                NIX_CI_EVAL_WITHOUT_IETS_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval-without-iets;
+                INTEGRATION_FLAKE = ./test/integration/flake.nix;
+              }
+              ''
+                export HOME=$TMPDIR
+                bash ${./test/iets}/run.sh
                 touch $out
               '';
 

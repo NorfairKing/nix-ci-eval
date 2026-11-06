@@ -5,6 +5,27 @@
 
 namespace nixcieval {
 
+std::string nixStringLiteral(const std::string & value) {
+    std::string out = "\"";
+    for (char c : value) {
+        switch (c) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '$':
+            out += "\\$";
+            break;
+        default:
+            out += c;
+        }
+    }
+    out += "\"";
+    return out;
+}
+
 void WorkerCostModel::recordAttr(Duration duration) {
     attrTotal_ += duration;
     attrCount_++;

@@ -198,14 +198,9 @@ That loss only applies to repositories that allow IFD. NixCI has an
 inheritable `allow-import-from-derivation` setting, which the worker turns
 into `--no-import-from-derivation`, and some repositories set it to `false`
 (NixCI's own does, to keep its flake evaluable without building anything).
-For those, the question is whether iets refuses exactly what Nix refuses,
-and `bench/ifd-probe.sh` asks it:
+For those, the question is whether iets refuses exactly what Nix refuses.
 
-```console
-$ bench/ifd-probe.sh path/to/iets
-```
-
-`bench/ifd-probe/flake.nix` has one output per way of reaching into a
+`test/iets/ifd-probe.nix` has one output per way of reaching into a
 derivation's output: `readFile`, `import`, `pathExists`, `hashFile`,
 `builtins.path`, IFD under `tryEval`, a whole output set produced by
 `import`, plus outputs that carry an unbuilt output's string context
@@ -330,9 +325,10 @@ In order:
    walk, depth bound and edge discovery, and feeding the edges from the
    derivation table rather than from a store.
 4. Route only repositories with `allow-import-from-derivation = false` to
-   it at first, keeping Nix for the rest. `bench/ifd-probe.sh` belongs in
-   CI next to the differential, because that routing rests on the two
-   refusing the same things. Decide about the IFD-allowing repositories with
-   the flakes that actually need IFD in front of you.
+   it at first, keeping Nix for the rest. Decide about the IFD-allowing
+   repositories with the flakes that actually need IFD in front of you.
+
+Step 4 came first in the end, without the Rust frontend:
+[iets-hybrid.md](iets-hybrid.md) describes it.
 
 The harness is committed, so re-measuring is one command.

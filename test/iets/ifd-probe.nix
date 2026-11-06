@@ -1,5 +1,5 @@
 # One output per way an evaluation can reach into a derivation's output, for
-# bench/ifd-probe.sh to ask whether iets refuses exactly what Nix refuses
+# test/iets/run.sh to assert that iets refuses exactly what Nix refuses
 # with import-from-derivation turned off.
 #
 # Every IFD shape appears twice: against an output that was built before the

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "args.hh"
+#include "iets.hh"
 
 namespace nix {
 class EvalState;
@@ -21,6 +23,16 @@ namespace nixcieval {
 // Local (file://), github: and gitlab: references, and anything but git, are
 // returned unchanged. See the definition for why.
 nix::FlakeRef shallowIfRemoteGit(const nix::FlakeRef & flakeRef, bool shallow);
+
+// Parse a flake reference the way the evaluator does, for deciding whether
+// iets can evaluate it. Throws on a reference Nix cannot parse.
+RootRef describeFlakeRef(const std::string & flakeRef);
+
+// The socket of the Nix daemon that the store this tool opens is served by,
+// or nothing when it opens a store some other way (a local store, for
+// instance). iets has no store of its own and writes .drv files through a
+// daemon, which has to be the same one this tool reads edges from.
+std::optional<std::string> daemonSocketPath();
 
 // What evaluating one attribute produced.
 enum class OutcomeKind {

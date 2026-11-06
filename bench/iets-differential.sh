@@ -5,7 +5,10 @@
 #   bench/iets-differential.sh [--no-import-from-derivation] <iets-binary> <flake-ref>...
 #
 # --no-import-from-derivation goes to nix-ci-eval alone, because iets never
-# builds during evaluation and has nothing to turn off.
+# builds during evaluation and has nothing to turn off. nix-ci-eval itself
+# evaluates with iets when IFD is off, so NIX_CI_EVAL_BIN then has to be a
+# build without it (`nix build .#nix-ci-eval-without-iets`), or this compares
+# iets with itself. The script refuses to carry on if it is not.
 #
 # Where bench/fix-differential.sh swaps one evaluator for another underneath
 # the same expression, this compares two whole tools: `iets eval-jobs` walks
@@ -102,6 +105,11 @@ for flake in "$@"; do
 
   nceMs=$(run_nce "$work/nce.json" "$flake")
   ietsMs=$(run_iets "$work/iets.json" "$flake")
+
+  if grep -q '^nix-ci-eval: iets reported' "$work/nce.json.err"; then
+    echo "  nix-ci-eval evaluated with iets; set NIX_CI_EVAL_BIN to a build without it" >&2
+    exit 2
+  fi
 
   if [ "$(jq 'length' < "$work/nce.json")" = 0 ]; then
     report_failure "nix-ci-eval" "$work/nce.json"

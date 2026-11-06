@@ -89,4 +89,12 @@ $ nix run github:NorfairKing/nix-ci-eval -- --flake . --system x86_64-linux --im
 $ nix run github:NorfairKing/nix-ci-eval -- --flake . --system x86_64-linux --no-shallow
 ```
 
+## Import from derivation
+
+Import-from-derivation is allowed by default. With
+`--no-import-from-derivation`, a `git` flake is evaluated with
+[iets](https://github.com/numtide/iets), which is several times faster, and
+whatever iets cannot evaluate is handed to Nix, so the output is the same as
+Nix would give. [docs/iets-hybrid.md](docs/iets-hybrid.md) has the details.
+
 Run `nix run github:NorfairKing/nix-ci-eval -- --help` for all flags.

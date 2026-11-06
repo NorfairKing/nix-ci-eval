@@ -2,7 +2,10 @@
 # Ask iets (https://github.com/numtide/iets) and nix-ci-eval to discover the
 # same flake's outputs, and compare the derivations they arrive at.
 #
-#   bench/iets-differential.sh <iets-binary> <flake-ref>...
+#   bench/iets-differential.sh [--no-import-from-derivation] <iets-binary> <flake-ref>...
+#
+# --no-import-from-derivation goes to nix-ci-eval alone, because iets never
+# builds during evaluation and has nothing to turn off.
 #
 # Where bench/fix-differential.sh swaps one evaluator for another underneath
 # the same expression, this compares two whole tools: `iets eval-jobs` walks
@@ -25,6 +28,12 @@
 # on whatever machine this is, which is enough to see an order of magnitude
 # and not enough to publish.
 set -uo pipefail
+
+nce_flags=()
+if [ "${1:-}" = "--no-import-from-derivation" ]; then
+  nce_flags+=("$1")
+  shift
+fi
 
 if [ "$#" -lt 2 ]; then
   sed -n '2,4p' "$0" >&2
@@ -56,7 +65,7 @@ iets_map='select(has("attrPath"))
 run_nce() { # output-file flake -> milliseconds, via stdout
   local start end
   start=$(date +%s%N)
-  "$nce" --flake "$2" --system "$system" --no-dependencies \
+  "$nce" --flake "$2" --system "$system" --no-dependencies "${nce_flags[@]}" \
     > "$work/nce.ndjson" 2> "$1.err"
   end=$(date +%s%N)
   jq -S -s "map($nce_map) | add // {}" < "$work/nce.ndjson" > "$1"

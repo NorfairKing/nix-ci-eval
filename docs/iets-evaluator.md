@@ -20,7 +20,8 @@ import-from-derivation, bound its own walk, or report transitive dependency
 edges. None of those is an evaluator problem; the first is a caller problem
 and the rest are frontend problems, and a replacement frontend is a Rust
 program rather than this C++ one, because iets ships a Rust library and no C
-ABI.
+ABI. For repositories that turn IFD off, iets refuses exactly the
+attributes Nix refuses, so those could move without losing any outputs.
 
 ## How the comparison was made
 
@@ -193,6 +194,42 @@ It is a per-attribute error, not a silent wrong answer, and the attribute is
 still reported. But a flake that needs IFD loses the outputs behind it, and
 `--import-from-derivation` becomes a flag with nothing behind it.
 
+That loss only applies to repositories that allow IFD. NixCI has an
+inheritable `allow-import-from-derivation` setting, which the worker turns
+into `--no-import-from-derivation`, and some repositories set it to `false`
+(NixCI's own does, to keep its flake evaluable without building anything).
+For those, the question is whether iets refuses exactly what Nix refuses,
+and `bench/ifd-probe.sh` asks it:
+
+```console
+$ bench/ifd-probe.sh path/to/iets
+```
+
+`bench/ifd-probe/flake.nix` has one output per way of reaching into a
+derivation's output: `readFile`, `import`, `pathExists`, `hashFile`,
+`builtins.path`, IFD under `tryEval`, a whole output set produced by
+`import`, plus outputs that carry an unbuilt output's string context
+without reading it. Each IFD shape appears twice, once against an output
+that the probe builds first. That half is the one that matters: Nix with
+IFD off refuses even an output that is already in the store, and iets's
+error ("`...drv` is not built") suggested it might not.
+
+It does. With IFD off, the two agree on all 17 attributes: the same 13
+fail, the same 4 succeed with the same drvPaths, and the whole IFD-produced
+`checks` set fails as a set in both. This held with `--no-instantiate` and
+with iets talking to the daemon, which is the mode that could have read a
+built output. Neither `tryEval` catches the refusal. With IFD on, as a
+control, they disagree on 11 of the 17, so the probe can tell them apart.
+
+The reasons match too, with one exception: `builtins.path` on a built
+output is refused by Nix because IFD is off and by iets because absolute
+paths are forbidden in pure mode. Both fail the attribute, so a job sees an
+error either way, but the message a user reads would differ.
+
+So for a repository with IFD off, this gap is not a gap. The caller knows
+the setting before it evaluates, so it can choose the evaluator per
+repository rather than per attribute.
+
 ### The walk has no depth bound
 
 This tool bounds its walk because an attribute set can contain itself. Given
@@ -279,7 +316,9 @@ fresh", and this tool's entire job is to be believed about what a flake
 builds. The gaps are also not all iets's to close. Whether the caller can
 clone before evaluating is a decision about NixCI, not about iets, and
 nothing else here is worth starting until it is made. IFD is a real
-capability loss that no frontend can paper over.
+capability loss that no frontend can paper over, but only for repositories
+that allow it; those that turn it off lose nothing, and they make a natural
+first group to move.
 
 In order:
 
@@ -290,6 +329,10 @@ In order:
 3. Prototype the frontend in Rust on `iets::api`, keeping this repository's
    walk, depth bound and edge discovery, and feeding the edges from the
    derivation table rather than from a store.
-4. Decide about IFD with the flakes that actually need it in front of you.
+4. Route only repositories with `allow-import-from-derivation = false` to
+   it at first, keeping Nix for the rest. `bench/ifd-probe.sh` belongs in
+   CI next to the differential, because that routing rests on the two
+   refusing the same things. Decide about the IFD-allowing repositories with
+   the flakes that actually need IFD in front of you.
 
 The harness is committed, so re-measuring is one command.

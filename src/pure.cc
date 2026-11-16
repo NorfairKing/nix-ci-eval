@@ -12,8 +12,8 @@ void WorkerCostModel::recordAttr(Duration duration) {
 
 void WorkerCostModel::recordFirstResult(Duration delay) {
     // Everything the worker spent beyond an ordinary attribute is what its
-    // existence cost: process startup, loading the flake, and forcing the
-    // shared evaluation substrate.
+    // existence cost: process startup, and whatever of the flake it had to
+    // load and force for itself rather than inherit.
     Duration startup = delay - meanAttr();
     if (startup > startupCost_) {
         startupCost_ = startup;
@@ -275,6 +275,60 @@ bool shouldRetryAfterWorkerDeath(int attemptsSoFar) {
     // same attribute.
     constexpr int maxAttempts = 2;
     return attemptsSoFar < maxAttempts;
+}
+
+std::optional<std::size_t>
+privateMiBFromSmapsRollup(const std::string & rollup) {
+    bool found = false;
+    std::size_t kib = 0;
+    for (const auto * field : {"Private_Clean:", "Private_Dirty:"}) {
+        auto at = rollup.find(field);
+        if (at == std::string::npos) {
+            continue;
+        }
+        at += std::string(field).size();
+        std::size_t value = 0;
+        bool digits = false;
+        while (at < rollup.size() && rollup[at] == ' ') {
+            at++;
+        }
+        while (at < rollup.size() && rollup[at] >= '0' && rollup[at] <= '9') {
+            value = value * 10 + static_cast<std::size_t>(rollup[at] - '0');
+            at++;
+            digits = true;
+        }
+        if (!digits) {
+            continue;
+        }
+        kib += value;
+        found = true;
+    }
+    if (!found) {
+        return std::nullopt;
+    }
+    return kib / 1024;
+}
+
+std::optional<std::size_t> threadsFromProcStatus(const std::string & status) {
+    auto at = status.find("Threads:");
+    if (at == std::string::npos) {
+        return std::nullopt;
+    }
+    at += std::string("Threads:").size();
+    while (at < status.size() && (status[at] == ' ' || status[at] == '\t')) {
+        at++;
+    }
+    std::size_t count = 0;
+    bool digits = false;
+    while (at < status.size() && status[at] >= '0' && status[at] <= '9') {
+        count = count * 10 + static_cast<std::size_t>(status[at] - '0');
+        at++;
+        digits = true;
+    }
+    if (!digits) {
+        return std::nullopt;
+    }
+    return count;
 }
 
 std::string truncateForLine(const std::string & message, std::size_t maxBytes) {

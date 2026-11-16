@@ -8,6 +8,8 @@
 
 namespace nixcieval {
 
+class Evaluator;
+
 // Serialise a line, replacing anything that is not valid UTF-8 rather than
 // refusing to encode it.
 //
@@ -23,5 +25,12 @@ std::string dumpLossy(const nlohmann::json & value);
 // results to 'toParentFd'. Never returns normally; it exits the process.
 [[noreturn]] void runWorker(const Args & args, int toParentFd,
                             int fromParentFd);
+
+// Run the same loop on an evaluator inherited from the process that forked
+// this one, which has already loaded the flake and forced what its outputs
+// share. Takes over the store first, since that is the one thing a fork must
+// not leave shared. Never returns normally; it exits the process.
+[[noreturn]] void runInheritedWorker(const Args & args, Evaluator & evaluator,
+                                     int toParentFd, int fromParentFd);
 
 } // namespace nixcieval

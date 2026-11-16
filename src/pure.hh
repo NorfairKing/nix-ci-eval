@@ -16,15 +16,16 @@ namespace nixcieval {
 // What a run has learned about the cost of evaluating this flake, used to size
 // the worker pool.
 //
-// A bigger pool is not always better. Every worker process must force the
-// flake's shared evaluation substrate (nixpkgs, overlays, package sets) before
-// it can answer its first attribute, and because workers do not share an
-// evaluator heap, each one repeats that work in full. Past the point where the
-// pool can cover the backlog, extra workers therefore buy no wall-clock time
-// and cost a full substrate evaluation each.
+// A bigger pool is not always better, and how much better depends on what a
+// worker costs to start. One forked from a warm evaluator inherits the flake
+// and everything its outputs share, and costs almost nothing; one that has to
+// load the flake and force all of that itself costs the run that whole
+// evaluation, and past the point where the pool can cover the backlog, extra
+// workers of that kind buy no wall-clock time at all.
 //
-// Both quantities that decide the trade-off are measured as the run proceeds
-// rather than assumed, so the model adapts to the flake and the machine.
+// Which kind a run gets is not assumed: both quantities that decide the
+// trade-off are measured as the run proceeds, so the pool grows freely when
+// workers are cheap and cautiously when they are not.
 class WorkerCostModel {
   public:
     using Duration = std::chrono::steady_clock::duration;
@@ -217,14 +218,42 @@ class EdgeDiscovery {
 // This is what a worker is using now, deliberately not the lifetime peak that
 // getrusage reports: a peak never falls, so one expensive attribute would put
 // a worker permanently over the memory ceiling and force it to be restarted
-// after every subsequent attribute for the rest of the run, re-forcing the
-// whole evaluation substrate each time.
+// after every subsequent attribute for the rest of the run.
 //
 // Returns 0 if the contents do not have the expected shape, so an unreadable
 // or unexpected /proc leaves the ceiling un-triggered rather than recycling
 // every worker constantly.
 std::size_t residentMiBFromStatm(const std::string & statm,
                                  std::size_t pageSizeBytes);
+
+// The resident size in MiB that this process does not share with any other,
+// from the contents of /proc/self/smaps_rollup: its Private_Clean and
+// Private_Dirty lines, which are reported in KiB.
+//
+// This is what a worker costs on top of the evaluator it inherited from the
+// process that forked it. Total resident size would count that inherited
+// evaluator against every worker sharing it, so a pool that shares one 2 GiB
+// evaluator would have every worker over a 2 GiB ceiling while between them
+// they held 2 GiB once.
+//
+// Returns nothing when the contents do not have the expected shape, so that a
+// kernel without smaps_rollup falls back to the resident figure rather than
+// reading zero and never recycling a worker at all.
+std::optional<std::size_t>
+privateMiBFromSmapsRollup(const std::string & rollup);
+
+// The number of threads in a process, from the contents of
+// /proc/<pid>/status.
+//
+// A forked child inherits the address space of its parent but none of its
+// threads, so anything that answers on a thread of its own answers nothing in
+// the child. Nix starts one to download with, and a worker that inherited it
+// would wait forever on its first fetch. Watching this number is how a run
+// notices that its evaluator has become something no worker may inherit.
+//
+// Returns nothing when the contents do not have the expected shape, which a
+// caller reads as the unsafe answer rather than a count of zero.
+std::optional<std::size_t> threadsFromProcStatus(const std::string & status);
 
 // Shorten a message that is about to be put on a line, so that a flake cannot
 // make one arbitrarily large. A message longer than 'maxBytes' is cut and

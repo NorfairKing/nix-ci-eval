@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -42,9 +43,11 @@ std::size_t currentResidentMiB() {
     // resident_size is current RSS in bytes, matching Linux's resident pages.
     mach_task_basic_info_data_t info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
-        return 0;
+    const auto result = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                                  reinterpret_cast<task_info_t>(&info), &count);
+    if (result != KERN_SUCCESS) {
+        throw std::runtime_error("could not measure worker RSS: " +
+                                 std::to_string(result));
     }
     return info.resident_size / (1024 * 1024);
 #else

@@ -19,6 +19,7 @@
 #ifdef __linux__
 #include <sys/prctl.h>
 #elif defined(__APPLE__)
+#include <fcntl.h>
 #include <sys/event.h>
 #endif
 #include <sys/wait.h>
@@ -179,6 +180,11 @@ Worker forkWorker(const Args & args, const std::vector<int> & inheritedFds) {
         const int queue = kqueue();
         if (queue < 0) {
             perror("nix-ci-eval: kqueue");
+            _Exit(1);
+        }
+        // The queue belongs to this worker, not programs it may exec.
+        if (fcntl(queue, F_SETFD, FD_CLOEXEC) < 0) {
+            perror("nix-ci-eval: fcntl");
             _Exit(1);
         }
         struct kevent event;

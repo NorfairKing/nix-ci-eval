@@ -66,6 +66,7 @@ commits_fetched() {
   cache="$(mktemp -d)"
   store="$(mktemp -d)"
   env \
+    NIX_CONFIG='substituters =' \
     XDG_CACHE_HOME="$cache" \
     HOME="$root/home" \
     NIX_STORE_DIR="$store/store" \

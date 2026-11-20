@@ -96,6 +96,15 @@
                 bash ${./test/stackdepth}/run.sh
                 touch $out
               '';
+        } // nixpkgs.lib.optionalAttrs (sys == "aarch64-darwin") {
+          nix-ci-eval-darwin-test = pkgs.runCommand "nix-ci-eval-darwin-test"
+            {
+              NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+            }
+            ''
+              bash ${./test/darwin/run.sh}
+              touch $out
+            '';
         });
 
       devShells.${devSystem}.default =

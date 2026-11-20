@@ -7,12 +7,12 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forEachSystem = nixpkgs.lib.genAttrs systems;
       pkgsFor = sys: import nixpkgs { system = sys; };
 
       # The dev shell is only built where it is developed, so it stays a
-      # single-system output while the tool itself is built for both.
+      # single-system output while the tool itself is built for all systems.
       devSystem = "x86_64-linux";
     in
     {

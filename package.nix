@@ -26,8 +26,6 @@ stdenv.mkDerivation {
     description = "Discover a flake's buildable outputs for one system, fast and in parallel";
     homepage = "https://github.com/NorfairKing/nix-ci-eval";
     mainProgram = "nix-ci-eval";
-    # The per-worker memory ceiling reads ru_maxrss as KiB, which is a Linux
-    # convention rather than a portable one.
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.linux ++ [ "aarch64-darwin" ];
   };
 }

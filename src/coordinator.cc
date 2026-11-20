@@ -16,7 +16,11 @@
 #include <pthread.h>
 #include <set>
 #include <string>
+#ifdef __linux__
 #include <sys/prctl.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -164,12 +168,44 @@ Worker forkWorker(const Args & args, const std::vector<int> & inheritedFds) {
         //
         // Die with the coordinator. Without this a worker whose parent was
         // killed keeps evaluating, holding a core and its whole heap, long
-        // after the caller believes the run is over. The getppid check closes
-        // the window where the parent died before prctl was reached.
+        // after the caller believes the run is over. Check getppid after
+        // arming the watcher in case the parent already died.
+#ifdef __linux__
         prctl(PR_SET_PDEATHSIG, SIGKILL);
         if (getppid() != parentPid) {
             _Exit(1);
         }
+#elif defined(__APPLE__)
+        const int queue = kqueue();
+        if (queue < 0) {
+            perror("nix-ci-eval: kqueue");
+            _Exit(1);
+        }
+        struct kevent event;
+        EV_SET(&event, parentPid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT,
+               0, nullptr);
+        if (kevent(queue, &event, 1, nullptr, 0, nullptr) < 0) {
+            if (errno != ESRCH) {
+                perror("nix-ci-eval: kevent");
+            }
+            _Exit(1);
+        }
+        if (getppid() != parentPid) {
+            _Exit(1);
+        }
+        // Wait separately so parent death stops even an in-flight evaluation.
+        try {
+            std::thread([queue] {
+                struct kevent event;
+                while (kevent(queue, nullptr, 0, &event, 1, nullptr) < 0 &&
+                       errno == EINTR) {
+                }
+                _Exit(1);
+            }).detach();
+        } catch (...) {
+            _Exit(1);
+        }
+#endif
         // Nix blocks SIGINT, SIGTERM and friends and services them on a thread
         // of its own. A forked child inherits the mask but not the thread, so
         // leaving it in place would give the worker signals it has blocked and

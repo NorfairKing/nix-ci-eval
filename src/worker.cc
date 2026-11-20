@@ -11,6 +11,10 @@
 #include <cstdio>
 #include <unistd.h>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
+
 #include "line_io.hh"
 #include "nix_eval.hh"
 #include "pure.hh"
@@ -32,11 +36,18 @@ constexpr std::size_t kMaxMessageBytes = 64 * 1024;
 
 // How much this worker is holding right now, in MiB.
 //
-// Read from /proc rather than getrusage, whose ru_maxrss is a lifetime peak
-// that never falls: with the peak, one expensive attribute would leave a
-// worker over the ceiling forever and force a restart after every subsequent
-// attribute, re-forcing the whole evaluation substrate each time.
+// A lifetime peak (ru_maxrss) cannot tell whether memory is still resident.
 std::size_t currentResidentMiB() {
+#ifdef __APPLE__
+    // resident_size is current RSS in bytes, matching Linux's resident pages.
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return info.resident_size / (1024 * 1024);
+#else
     std::FILE * statm = std::fopen("/proc/self/statm", "r");
     if (statm == nullptr) {
         return 0;
@@ -50,6 +61,7 @@ std::size_t currentResidentMiB() {
     }
     return residentMiBFromStatm(std::string(buffer, read),
                                 static_cast<std::size_t>(pageSize));
+#endif
 }
 
 [[noreturn]] void fatalToParent(int toParentFd, const std::string & message) {

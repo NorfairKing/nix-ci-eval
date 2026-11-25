@@ -9,3 +9,4 @@ job formatter.x86_64-linux formatter cached=false
 job packages.x86_64-linux.alpha alpha cached=false
 job packages.x86_64-linux.beta beta cached=false
 job packages.x86_64-linux.nested.thing nested-thing cached=false
+job packages.x86_64-linux.slow slow cached=false

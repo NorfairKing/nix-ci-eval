@@ -28,6 +28,17 @@
         # A nested attribute set: the discovered name is several path
         # components (nested.thing), which the consumer joins back with a dot.
         nested.thing = drv "nested-thing" "echo nested > $out";
+        # Takes a moment to evaluate, so every edge is reported while it is still
+        # being evaluated, unless a lone worker happens to pick it up first.
+        # That is what lets the test assert that edges are streamed rather than
+        # batched to the end: without it, the last few jobs can arrive in one
+        # read, and every edge after them.
+        slow =
+          let
+            range = builtins.genList (i: i) 8000;
+            sum = builtins.foldl' (acc: _: acc + builtins.foldl' builtins.add 0 range) 0 range;
+          in
+          drv "slow" "echo ${toString sum} > $out";
       };
 
       checks.${system} = {

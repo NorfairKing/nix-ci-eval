@@ -327,6 +327,15 @@ int runCoordinator(const Args & args) {
     bool fatal = false;
     std::string fatalMessage;
 
+    // Every worker reports the inputs it sees arrive, so several can report
+    // the same one.
+    std::set<std::string> emittedInputs;
+    auto emitInput = [&](std::string storePath) {
+        if (emittedInputs.insert(storePath).second) {
+            emit("input", json{{"storePath", std::move(storePath)}});
+        }
+    };
+
     auto dispatch = [&]() {
         for (auto & worker : workers) {
             if (todo.empty()) {
@@ -364,6 +373,13 @@ int runCoordinator(const Args & args) {
         if (kind == "fatal") {
             fatal = true;
             fatalMessage = message.value("error", "worker failed");
+            return;
+        }
+        if (kind == "inputs") {
+            for (auto & storePath :
+                 message.at("storePaths").get<std::vector<std::string>>()) {
+                emitInput(std::move(storePath));
+            }
             return;
         }
 
@@ -664,6 +680,11 @@ int runCoordinator(const Args & args) {
     // spent waiting on workers.
     while (wantEdges && !edgeDiscovery.done()) {
         stepEdges(1024);
+    }
+
+    // Any a worker fetched without living to report it.
+    for (auto & storePath : fetchedInputs(args)) {
+        emitInput(std::move(storePath));
     }
 
     // Say that the stream is complete, as its last act.

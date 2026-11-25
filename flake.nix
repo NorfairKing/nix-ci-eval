@@ -67,6 +67,21 @@
                 touch $out
               '';
 
+          # Locks a flake with an input it uses and one it does not, and asserts
+          # only the used one is reported as fetched. Hermetic: both inputs are
+          # local paths, and the tool runs against a throwaway store.
+          nix-ci-eval-inputs-test =
+            pkgs.runCommand "nix-ci-eval-inputs-test"
+              {
+                nativeBuildInputs = [ pkgs.jq pkgs.nix ];
+                NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+              }
+              ''
+                export HOME=$TMPDIR
+                bash ${./test/inputs}/run.sh
+                touch $out
+              '';
+
           # Evaluates a deep-but-finite flake attribute under an 8 MiB soft
           # stack limit and asserts the worker discovers it rather than
           # overflowing, which asserts the tool raises the evaluation stack the

@@ -90,6 +90,15 @@ json jobToJson(const std::vector<std::string> & attrPath,
     }
 
     while (true) {
+        auto inputs = evaluator->newlyPresentInputs();
+        if (!inputs.empty()) {
+            json report;
+            report["t"] = "inputs";
+            report["storePaths"] = std::move(inputs);
+            if (!writeLine(toParentFd, dumpLossy(report))) {
+                std::_Exit(0);
+            }
+        }
         if (!writeLine(toParentFd, R"({"t":"ready"})")) {
             std::_Exit(0);
         }

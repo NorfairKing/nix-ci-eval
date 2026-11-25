@@ -61,6 +61,14 @@ class Evaluator {
     // Throws on evaluation failure.
     EvalOutcome evalAttr(const std::vector<std::string> & attrPath);
 
+    // The store paths of the sources of the flake's locked inputs that have
+    // arrived in the store since this was last asked, or since the flake was
+    // loaded the first time it is asked.
+    // Evaluation fetches an input when it first uses it, so asking after each
+    // attribute reports a fetched input right after the attribute that
+    // fetched it.
+    std::vector<std::string> newlyPresentInputs();
+
   private:
     struct Impl;
     Impl * impl_;
@@ -73,5 +81,13 @@ void initNixRuntime(const Args & args);
 // Strip ANSI escape sequences from an evaluation error message so it renders
 // cleanly in JSON output and logs.
 std::string cleanErrorMessage(const std::string & raw);
+
+// The store paths of the sources of the flake's locked inputs, however deeply
+// nested, that are in the store.
+// Evaluation fetches an input only when it uses it, so this includes every
+// input evaluation fetched, along with any that were in the store already.
+// The flake's own source is not among them.
+// Worked out from the lock file, so nothing is fetched that was not already.
+std::vector<std::string> fetchedInputs(const Args & args);
 
 } // namespace nixcieval

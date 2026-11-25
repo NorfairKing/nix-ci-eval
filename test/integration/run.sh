@@ -34,6 +34,8 @@ normalise='
       + " -> " + (.dependencies | map(join(".")) | join(","))
   elif .type == "error" then
     "error " + (.attrPath | join("."))
+  elif .type == "input" then
+    "input " + (.storePath | sub(".*/[0-9a-z]+-"; ""))
   elif .type == "done" then
     "done"
   else

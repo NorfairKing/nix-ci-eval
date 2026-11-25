@@ -15,6 +15,7 @@
 #include <nix/fetchers/fetchers.hh>
 #include <nix/flake/flake.hh>
 #include <nix/flake/flakeref.hh>
+#include <nix/flake/lockfile.hh>
 #include <nix/flake/settings.hh>
 #include <nix/main/shared.hh>
 #include <nix/store/derivations.hh>
@@ -83,6 +84,49 @@ std::string selectExpr(const std::string & system) {
            "}";
 }
 
+// Lock the flake to evaluate, the same way for every caller.
+nix::flake::LockedFlake lockForDiscovery(const Args & args,
+                                         nix::EvalState & state) {
+    auto flakeRef =
+        shallowIfRemoteGit(nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
+                                              std::filesystem::current_path()),
+                           args.shallow);
+    // Read-only locking: never update, write, or fetch from registries,
+    // and require the flake to be fully locked.
+    nix::flake::LockFlags lockFlags;
+    lockFlags.updateLockFile = false;
+    lockFlags.writeLockFile = false;
+    lockFlags.useRegistries = false;
+    lockFlags.allowUnlocked = false;
+    return nix::flake::lockFlake(nix::flakeSettings, state, flakeRef,
+                                 lockFlags);
+}
+
+// The store paths of the sources of the locked inputs, however deeply nested,
+// whether or not they are in the store.
+// A set, because an input that several others follow is reachable along
+// several paths but has one source.
+nix::StorePathSet lockedInputPaths(const nix::flake::LockFile & lockFile,
+                                   nix::Store & store) {
+    nix::StorePathSet paths;
+    for (const auto & [inputAttrPath, edge] : lockFile.getAllInputs()) {
+        const auto * node =
+            std::get_if<nix::ref<nix::flake::LockedNode>>(&edge);
+        if (node == nullptr) {
+            // A follows: the node it points at is visited on its own path.
+            continue;
+        }
+        const auto & input = (*node)->lockedRef.input;
+        if (!input.getNarHash()) {
+            // An input given by a relative path, which lives inside the
+            // source of the flake that names it.
+            continue;
+        }
+        paths.insert(input.computeStorePath(store));
+    }
+    return paths;
+}
+
 } // namespace
 
 // Fetching a git flake ref pulls down every commit the requested one descends
@@ -120,25 +164,18 @@ struct Evaluator::Impl {
     nix::ref<nix::Store> store;
     nix::ref<nix::EvalState> state;
     nix::Value * root;
+    // A connection of its own, so that forgetting what it has been told about
+    // the inputs forgets nothing evaluation relies on.
+    nix::ref<nix::Store> inputProbe;
+    nix::StorePathSet unreportedInputs;
 
     explicit Impl(const Args & a)
         : args(a), store(nix::openStore()),
           state(nix::make_ref<nix::EvalState>(
               nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings)),
-          root(nullptr) {
-        auto flakeRef = shallowIfRemoteGit(
-            nix::parseFlakeRef(nix::fetchSettings, args.flakeRef,
-                               std::filesystem::current_path()),
-            args.shallow);
-        // Read-only locking: never update, write, or fetch from registries,
-        // and require the flake to be fully locked.
-        nix::flake::LockFlags lockFlags;
-        lockFlags.updateLockFile = false;
-        lockFlags.writeLockFile = false;
-        lockFlags.useRegistries = false;
-        lockFlags.allowUnlocked = false;
-        auto locked = nix::flake::lockFlake(nix::flakeSettings, *state,
-                                            flakeRef, lockFlags);
+          root(nullptr), inputProbe(nix::openStore()) {
+        auto locked = lockForDiscovery(args, *state);
+        unreportedInputs = lockedInputPaths(locked.lockFile, *store);
         auto * flakeValue = state->allocValue();
         nix::flake::callFlake(*state, locked, *flakeValue);
 
@@ -198,6 +235,23 @@ struct Evaluator::Impl {
         return infos.size() == toQuery.size();
     }
 
+    std::vector<std::string> newlyPresentInputs() {
+        if (unreportedInputs.empty()) {
+            // Asking the daemon about no paths is still a round trip.
+            return {};
+        }
+        // A store remembers for an hour that a path was missing, and these
+        // appear while the run goes on.
+        inputProbe->clearPathInfoCache();
+        std::vector<std::string> present;
+        for (const auto & path :
+             inputProbe->queryValidPaths(unreportedInputs)) {
+            present.push_back(inputProbe->printStorePath(path));
+            unreportedInputs.erase(path);
+        }
+        return present;
+    }
+
     EvalOutcome evalAttr(const std::vector<std::string> & attrPath) {
         nix::Value * value = navigate(attrPath);
         if (value == nullptr) {
@@ -237,6 +291,10 @@ Evaluator::~Evaluator() { delete impl_; }
 
 EvalOutcome Evaluator::evalAttr(const std::vector<std::string> & attrPath) {
     return impl_->evalAttr(attrPath);
+}
+
+std::vector<std::string> Evaluator::newlyPresentInputs() {
+    return impl_->newlyPresentInputs();
 }
 
 void initNixRuntime(const Args & args) {
@@ -288,6 +346,19 @@ void initNixRuntime(const Args & args) {
 
 std::string cleanErrorMessage(const std::string & raw) {
     return nix::filterANSIEscapes(raw, true);
+}
+
+std::vector<std::string> fetchedInputs(const Args & args) {
+    auto store = nix::openStore();
+    auto state = nix::make_ref<nix::EvalState>(
+        nix::LookupPath{}, store, nix::fetchSettings, nix::evalSettings);
+    auto locked = lockForDiscovery(args, *state);
+    std::vector<std::string> present;
+    for (const auto & path :
+         store->queryValidPaths(lockedInputPaths(locked.lockFile, *store))) {
+        present.push_back(store->printStorePath(path));
+    }
+    return present;
 }
 
 } // namespace nixcieval

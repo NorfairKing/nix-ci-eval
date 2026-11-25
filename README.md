@@ -56,6 +56,26 @@ it depends on, so take their union rather than the last one you saw.
 Dependencies are transitive: if `a` depends on `b` and `b` on `c`, then `a`
 depends on `c` too and that edge is reported.
 
+An `input` for the source of each of the flake's locked inputs that is in
+the store, however deeply nested, once for each.
+Evaluation fetches an input only when it uses it, so these include every one
+it needed, along with any that were in the store already.
+Each is reported as soon as it is seen in the store, which for a fetched one
+is right after the attribute that fetched it, so the order of `input` and
+`job` lines says nothing more.
+A caller can upload them to a binary cache so that the next evaluation
+substitutes them instead of fetching them again.
+
+```json
+{
+  "type": "input",
+  "storePath": "/nix/store/7b8v6yfgq0mc7cbkn0jz8a3w9n1rh5sl-source"
+}
+```
+
+The flake's own source is not among them, and neither is an input given by a
+relative path, which lives inside the source of the flake that names it.
+
 The last line is always this, and only ever appears once:
 
 ```json

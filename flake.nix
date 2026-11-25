@@ -25,7 +25,11 @@
       packages = forEachSystem (sys:
         let pkgs = pkgsFor sys; in
         {
-          nix-ci-eval = pkgs.callPackage ./package.nix { };
+          # Nix 2.35 computes a Git LFS endpoint that ends in .git, as the
+          # LFS server discovery spec says; older ones miss it for a remote
+          # without .git, which is how NixCI clones, so a flake with
+          # self.lfs = true failed to fetch. nixpkgs' default Nix is older.
+          nix-ci-eval = pkgs.callPackage ./package.nix { nix = pkgs.nixVersions.nix_2_35; };
           default = self.packages.${sys}.nix-ci-eval;
         });
 

@@ -32,6 +32,11 @@ nix_deps = [
   dependency('threads'),
 ]
 
+# Nix 2.35 renamed setStackSize to ensureStackSizeAtLeast.
+if dependency('nix-util', version : nix_version).version().version_compare('>=2.35')
+  add_project_arguments('-DNIX_CI_EVAL_ENSURE_STACK_SIZE_AT_LEAST', language : 'cpp')
+endif
+
 # Pure helpers and IO, free of the Nix libraries so they can be unit-tested on
 # their own.
 core_lib = static_library(

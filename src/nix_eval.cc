@@ -309,7 +309,11 @@ void initNixRuntime(const Args & args) {
     // discovery from regressing against what a caller could evaluate by hand.
     // Raised here in the coordinator, before any worker is forked, so every
     // worker inherits the larger limit.
+#ifdef NIX_CI_EVAL_ENSURE_STACK_SIZE_AT_LEAST
+    nix::ensureStackSizeAtLeast(64 * 1024 * 1024);
+#else
     nix::setStackSize(64 * 1024 * 1024);
+#endif
 
     nix::initNix();
     nix::initGC();

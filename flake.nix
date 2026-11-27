@@ -7,12 +7,12 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forEachSystem = nixpkgs.lib.genAttrs systems;
       pkgsFor = sys: import nixpkgs { system = sys; };
 
       # The dev shell is only built where it is developed, so it stays a
-      # single-system output while the tool itself is built for both.
+      # single-system output while the tool itself is built for all systems.
       devSystem = "x86_64-linux";
     in
     {
@@ -96,6 +96,15 @@
                 bash ${./test/stackdepth}/run.sh
                 touch $out
               '';
+        } // nixpkgs.lib.optionalAttrs (sys == "aarch64-darwin") {
+          nix-ci-eval-darwin-test = pkgs.runCommand "nix-ci-eval-darwin-test"
+            {
+              NIX_CI_EVAL_BIN = pkgs.lib.getExe self.packages.${sys}.nix-ci-eval;
+            }
+            ''
+              bash ${./test/darwin/run.sh}
+              touch $out
+            '';
         });
 
       devShells.${devSystem}.default =

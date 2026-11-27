@@ -44,6 +44,7 @@ normalise='
 
 raw="$store/raw.ndjson"
 env \
+  NIX_CONFIG='substituters =' \
   NIX_STORE_DIR="$store/store" \
   NIX_STATE_DIR="$store/state" \
   NIX_LOG_DIR="$store/log" \
